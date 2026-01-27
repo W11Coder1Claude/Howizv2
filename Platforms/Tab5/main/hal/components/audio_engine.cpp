@@ -207,6 +207,7 @@ void AudioEngine::setMicGain(float gain)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.micGain = std::clamp(gain, 0.0f, 240.0f);
+    _paramsChanged = true;
 }
 
 void AudioEngine::setHpf(bool enabled, float freq)
@@ -250,18 +251,21 @@ void AudioEngine::setOutputGain(float gain)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.outputGain = std::clamp(gain, 0.0f, 2.0f);
+    _paramsChanged = true;
 }
 
 void AudioEngine::setOutputVolume(int vol)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.outputVolume = std::clamp(vol, 0, 100);
+    _paramsChanged = true;
 }
 
 void AudioEngine::setMute(bool mute)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.outputMute = mute;
+    _paramsChanged = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
