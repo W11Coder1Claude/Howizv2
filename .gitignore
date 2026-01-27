@@ -1,0 +1,26 @@
+# Build output
+build/
+*.bin
+*.elf
+*.map
+
+# ESP-IDF managed components (downloaded by IDF component manager)
+managed_components/
+
+# sdkconfig is generated from sdkconfig.defaults - keep defaults, ignore generated
+Platforms/*/sdkconfig
+!Platforms/*/sdkconfig.defaults
+
+# Dependencies lock (regenerated)
+dependencies.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
