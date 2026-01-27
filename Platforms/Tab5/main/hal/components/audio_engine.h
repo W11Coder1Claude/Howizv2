@@ -15,7 +15,7 @@
  * Runs a continuous mic→DSP→headphone pipeline on a dedicated FreeRTOS task (Core 1).
  * Bypasses the HAL audio API for direct BSP codec access (streaming, not batch).
  *
- * DSP chain: HPF → LPF → EQ(3-band) → OutputGain → Clamp → Mute
+ * DSP chain: HPF → LPF → EQ(3-band) → [NS] → OutputGain → Clamp → Mute
  */
 
 struct AudioEngineParams {
@@ -32,6 +32,10 @@ struct AudioEngineParams {
     float eqLowGain       = 0.0f;    // dB (-12 to +12) @ 250 Hz
     float eqMidGain       = 0.0f;    // dB (-12 to +12) @ 1000 Hz
     float eqHighGain      = 0.0f;    // dB (-12 to +12) @ 4000 Hz
+
+    // Noise Suppression (ESP-SR standalone NS)
+    bool  nsEnabled       = false;
+    int   nsMode          = 1;       // 0=Mild, 1=Medium, 2=Aggressive
 
     // Output
     float outputGain      = 1.0f;    // Linear (0.0-2.0)
@@ -66,6 +70,8 @@ public:
     void setEqLow(float gainDb);
     void setEqMid(float gainDb);
     void setEqHigh(float gainDb);
+    void setNsEnabled(bool enabled);
+    void setNsMode(int mode);
     void setOutputGain(float gain);
     void setOutputVolume(int vol);
     void setMute(bool mute);
@@ -111,10 +117,15 @@ private:
     TaskHandle_t _taskHandle = nullptr;
 
     static constexpr int SAMPLE_RATE = 48000;
-    static constexpr int BLOCK_SIZE = 512;      // ~10.7ms latency
+    static constexpr int BLOCK_SIZE = 480;      // ~10.0ms latency (480/48000 = 10ms)
     static constexpr int NUM_CHANNELS_IN = 4;   // MIC-L, AEC, MIC-R, MIC-HP
     static constexpr int NUM_CHANNELS_OUT = 2;  // Stereo
+    static constexpr int NS_FRAME_16K = 160;    // 10ms @ 16kHz (480/3)
 
     // Peak hold decay factor per block (~300ms decay)
     static constexpr float PEAK_DECAY = 0.97f;
+
+    // NS handles (opaque pointers, typed in .cpp via esp_ns.h)
+    void* _nsHandleL = nullptr;
+    void* _nsHandleR = nullptr;
 };

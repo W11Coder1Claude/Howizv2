@@ -10,7 +10,98 @@
 #include <cstring>
 #include <algorithm>
 
+extern "C" {
+#include <esp_ns.h>
+}
+
 static const char* TAG = "AudioEngine";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Polyphase Resampler (21-tap Kaiser-windowed sinc, ~70dB stopband)
+// Ported from Boosted speech_dsp.cpp
+// ─────────────────────────────────────────────────────────────────────────────
+
+class Resampler {
+public:
+    static constexpr int FILTER_TAPS = 21;
+    static constexpr int HALF_TAPS = FILTER_TAPS / 2;  // 10
+
+    void init(bool downsample) {
+        _downsample = downsample;
+        static const float lpf_coeffs[FILTER_TAPS] = {
+            -0.0029f, -0.0056f,  0.0000f,  0.0175f,  0.0303f,  0.0000f,
+            -0.0657f, -0.1186f,  0.0000f,  0.3125f,  0.5002f,  0.3125f,
+             0.0000f, -0.1186f, -0.0657f,  0.0000f,  0.0303f,  0.0175f,
+             0.0000f, -0.0056f, -0.0029f
+        };
+        std::memcpy(_coeffs, lpf_coeffs, sizeof(lpf_coeffs));
+        std::memset(_history, 0, sizeof(_history));
+        std::memset(_upHistory, 0, sizeof(_upHistory));
+    }
+
+    void downsample3(const float* in, float* out, size_t outFrames) {
+        size_t inFrames = outFrames * 3;
+        for (size_t i = 0; i < outFrames; i++) {
+            float sum = 0.0f;
+            size_t inIdx = i * 3;
+            for (int t = 0; t < FILTER_TAPS; t++) {
+                int srcIdx = static_cast<int>(inIdx) - HALF_TAPS + t;
+                float sample;
+                if (srcIdx < 0) {
+                    int histIdx = HALF_TAPS + srcIdx;
+                    sample = (histIdx >= 0) ? _history[histIdx] : 0.0f;
+                } else if (srcIdx < static_cast<int>(inFrames)) {
+                    sample = in[srcIdx];
+                } else {
+                    sample = 0.0f;
+                }
+                sum += sample * _coeffs[t];
+            }
+            out[i] = sum;
+        }
+        if (inFrames >= static_cast<size_t>(HALF_TAPS)) {
+            for (int i = 0; i < HALF_TAPS; i++) {
+                _history[i] = in[inFrames - HALF_TAPS + i];
+            }
+        }
+    }
+
+    void upsample3(const float* in, float* out, size_t inFrames) {
+        for (size_t i = 0; i < inFrames; i++) {
+            for (int phase = 0; phase < 3; phase++) {
+                float sum = 0.0f;
+                for (int t = 0; t < 7; t++) {
+                    int srcIdx = static_cast<int>(i) - 3 + t;
+                    float sample;
+                    if (srcIdx < 0) {
+                        int histIdx = 3 + srcIdx;
+                        sample = (histIdx >= 0) ? _upHistory[histIdx] : 0.0f;
+                    } else if (srcIdx < static_cast<int>(inFrames)) {
+                        sample = in[srcIdx];
+                    } else {
+                        sample = 0.0f;
+                    }
+                    int coeffIdx = t * 3 + phase;
+                    if (coeffIdx < FILTER_TAPS) {
+                        sum += sample * _coeffs[coeffIdx];
+                    }
+                }
+                out[i * 3 + phase] = sum * 3.0f;
+            }
+        }
+        if (inFrames >= 3) {
+            for (int i = 0; i < 3; i++) {
+                _upHistory[i] = in[inFrames - 3 + i];
+            }
+        }
+    }
+
+private:
+    bool _downsample = true;
+    float _coeffs[FILTER_TAPS] = {};
+    float _history[HALF_TAPS] = {};
+    float _upHistory[3] = {};
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Singleton
@@ -119,6 +210,34 @@ void AudioEngine::recalcAllCoeffs()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NS handle management
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void destroyNsHandles(void*& handleL, void*& handleR)
+{
+    if (handleL) {
+        ns_destroy(static_cast<ns_handle_t>(handleL));
+        handleL = nullptr;
+    }
+    if (handleR) {
+        ns_destroy(static_cast<ns_handle_t>(handleR));
+        handleR = nullptr;
+    }
+}
+
+static void createNsHandles(void*& handleL, void*& handleR, int mode)
+{
+    handleL = ns_pro_create(10, mode, 16000);
+    handleR = ns_pro_create(10, mode, 16000);
+    if (!handleL || !handleR) {
+        mclog::tagError("AudioEngine", "failed to create NS handles (mode={})", mode);
+        destroyNsHandles(handleL, handleR);
+    } else {
+        mclog::tagInfo("AudioEngine", "NS handles created (mode={})", mode);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Start / Stop
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -144,7 +263,12 @@ void AudioEngine::start()
     _eqMidL.reset(); _eqMidR.reset();
     _eqHighL.reset(); _eqHighR.reset();
 
-    xTaskCreatePinnedToCore(audioTask, "audio_eng", 8192, this, 10, &_taskHandle, 1);
+    // Create NS handles if NS is enabled
+    if (_params.nsEnabled) {
+        createNsHandles(_nsHandleL, _nsHandleR, _params.nsMode);
+    }
+
+    xTaskCreatePinnedToCore(audioTask, "audio_eng", 16384, this, 10, &_taskHandle, 1);
 }
 
 void AudioEngine::stop()
@@ -161,6 +285,9 @@ void AudioEngine::stop()
         vTaskDelay(pdMS_TO_TICKS(50));
         _taskHandle = nullptr;
     }
+
+    // Destroy NS handles
+    destroyNsHandles(_nsHandleL, _nsHandleR);
 
     // Mute codec output
     bsp_codec_config_t* codec = bsp_get_codec_handle();
@@ -214,7 +341,7 @@ void AudioEngine::setHpf(bool enabled, float freq)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.hpfEnabled = enabled;
-    _params.hpfFrequency = std::clamp(freq, 20.0f, 500.0f);
+    _params.hpfFrequency = std::clamp(freq, 20.0f, 2000.0f);
     _paramsChanged = true;
 }
 
@@ -222,7 +349,7 @@ void AudioEngine::setLpf(bool enabled, float freq)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.lpfEnabled = enabled;
-    _params.lpfFrequency = std::clamp(freq, 2000.0f, 20000.0f);
+    _params.lpfFrequency = std::clamp(freq, 500.0f, 20000.0f);
     _paramsChanged = true;
 }
 
@@ -244,6 +371,20 @@ void AudioEngine::setEqHigh(float gainDb)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _params.eqHighGain = std::clamp(gainDb, -12.0f, 12.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNsEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.nsEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNsMode(int mode)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.nsMode = std::clamp(mode, 0, 2);
     _paramsChanged = true;
 }
 
@@ -297,9 +438,7 @@ void AudioEngine::processLoop()
     codec->set_mute(true);  // Start muted
 
     // Allocate I/O buffers
-    // Input: 4 channels × BLOCK_SIZE samples × 2 bytes = 4096 bytes
     const size_t inBufBytes = BLOCK_SIZE * NUM_CHANNELS_IN * sizeof(int16_t);
-    // Output: 2 channels × BLOCK_SIZE samples × 2 bytes = 2048 bytes
     const size_t outBufBytes = BLOCK_SIZE * NUM_CHANNELS_OUT * sizeof(int16_t);
 
     int16_t* inBuf = new int16_t[BLOCK_SIZE * NUM_CHANNELS_IN];
@@ -307,11 +446,29 @@ void AudioEngine::processLoop()
     float* floatL = new float[BLOCK_SIZE];
     float* floatR = new float[BLOCK_SIZE];
 
+    // NS processing buffers (16kHz domain)
+    float* down16kL = new float[NS_FRAME_16K];
+    float* down16kR = new float[NS_FRAME_16K];
+    int16_t* ns16kIn = new int16_t[NS_FRAME_16K];
+    int16_t* ns16kOut = new int16_t[NS_FRAME_16K];
+    float* up48kL = new float[BLOCK_SIZE];
+    float* up48kR = new float[BLOCK_SIZE];
+
+    // Resamplers
+    Resampler resamplerDownL, resamplerDownR;
+    Resampler resamplerUpL, resamplerUpR;
+    resamplerDownL.init(true);
+    resamplerDownR.init(true);
+    resamplerUpL.init(false);
+    resamplerUpR.init(false);
+
     mclog::tagInfo(TAG, "buffers allocated: in={}B out={}B", inBufBytes, outBufBytes);
 
     // Local copy of params to minimize lock time
     AudioEngineParams localParams;
     bool localParamsChanged = true;
+    bool prevNsEnabled = false;
+    int prevNsMode = -1;
 
     while (true) {
         // Check if we should stop
@@ -340,14 +497,28 @@ void AudioEngine::processLoop()
             // Apply mute
             codec->set_mute(localParams.outputMute);
 
+            // Handle NS enable/mode changes
+            if (localParams.nsEnabled != prevNsEnabled || localParams.nsMode != prevNsMode) {
+                if (localParams.nsEnabled) {
+                    // Recreate NS handles with new mode
+                    destroyNsHandles(_nsHandleL, _nsHandleR);
+                    createNsHandles(_nsHandleL, _nsHandleR, localParams.nsMode);
+                } else {
+                    destroyNsHandles(_nsHandleL, _nsHandleR);
+                }
+                prevNsEnabled = localParams.nsEnabled;
+                prevNsMode = localParams.nsMode;
+            }
+
             // Recalculate all biquad coefficients
             recalcAllCoeffs();
 
-            mclog::tagInfo(TAG, "params updated: micGain={:.0f} vol={} mute={} hpf={}/{:.0f}Hz lpf={}/{:.0f}Hz eq={:.1f}/{:.1f}/{:.1f}dB gain={:.2f}",
+            mclog::tagInfo(TAG, "params updated: micGain={:.0f} vol={} mute={} hpf={}/{:.0f}Hz lpf={}/{:.0f}Hz eq={:.1f}/{:.1f}/{:.1f}dB ns={}/mode={} gain={:.2f}",
                 localParams.micGain, localParams.outputVolume, localParams.outputMute,
                 localParams.hpfEnabled, localParams.hpfFrequency,
                 localParams.lpfEnabled, localParams.lpfFrequency,
                 localParams.eqLowGain, localParams.eqMidGain, localParams.eqHighGain,
+                localParams.nsEnabled, localParams.nsMode,
                 localParams.outputGain);
         }
 
@@ -395,14 +566,45 @@ void AudioEngine::processLoop()
             floatR[i] = _eqHighR.process(floatR[i]);
         }
 
-        // ── 6. Apply output gain ──
+        // ── 6. Noise Suppression (downsample → NS → upsample) ──
+        if (localParams.nsEnabled && _nsHandleL && _nsHandleR && samplesRead == BLOCK_SIZE) {
+            // Downsample 48kHz → 16kHz (480 → 160 samples)
+            resamplerDownL.downsample3(floatL, down16kL, NS_FRAME_16K);
+            resamplerDownR.downsample3(floatR, down16kR, NS_FRAME_16K);
+
+            // Process Left channel: float → int16 → NS → int16 → float
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                float s = std::clamp(down16kL[i], -1.0f, 1.0f);
+                ns16kIn[i] = static_cast<int16_t>(s * 32767.0f);
+            }
+            ns_process(static_cast<ns_handle_t>(_nsHandleL), ns16kIn, ns16kOut);
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                down16kL[i] = static_cast<float>(ns16kOut[i]) * scale;
+            }
+
+            // Process Right channel
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                float s = std::clamp(down16kR[i], -1.0f, 1.0f);
+                ns16kIn[i] = static_cast<int16_t>(s * 32767.0f);
+            }
+            ns_process(static_cast<ns_handle_t>(_nsHandleR), ns16kIn, ns16kOut);
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                down16kR[i] = static_cast<float>(ns16kOut[i]) * scale;
+            }
+
+            // Upsample 16kHz → 48kHz (160 → 480 samples)
+            resamplerUpL.upsample3(down16kL, floatL, NS_FRAME_16K);
+            resamplerUpR.upsample3(down16kR, floatR, NS_FRAME_16K);
+        }
+
+        // ── 7. Apply output gain ──
         float gain = localParams.outputGain;
         for (int i = 0; i < samplesRead; i++) {
             floatL[i] *= gain;
             floatR[i] *= gain;
         }
 
-        // ── 7. Compute RMS + peak for level metering ──
+        // ── 8. Compute RMS + peak for level metering ──
         float sumL = 0.0f, sumR = 0.0f;
         float pkL = 0.0f, pkR = 0.0f;
         for (int i = 0; i < samplesRead; i++) {
@@ -422,7 +624,7 @@ void AudioEngine::processLoop()
             _levels.peakRight = std::max(pkR, _levels.peakRight * PEAK_DECAY);
         }
 
-        // ── 8. Clamp and convert to int16 stereo output ──
+        // ── 9. Clamp and convert to int16 stereo output ──
         for (int i = 0; i < samplesRead; i++) {
             float l = std::clamp(floatL[i], -1.0f, 1.0f);
             float r = std::clamp(floatR[i], -1.0f, 1.0f);
@@ -430,12 +632,12 @@ void AudioEngine::processLoop()
             outBuf[i * 2 + 1] = (int16_t)(r * 32767.0f);
         }
 
-        // ── 9. Apply mute (zero buffer) ──
+        // ── 10. Apply mute (zero buffer) ──
         if (localParams.outputMute) {
             memset(outBuf, 0, samplesRead * NUM_CHANNELS_OUT * sizeof(int16_t));
         }
 
-        // ── 10. Write to I2S (stereo output) ──
+        // ── 11. Write to I2S (stereo output) ──
         size_t bytesWritten = 0;
         codec->i2s_write(outBuf, samplesRead * NUM_CHANNELS_OUT * sizeof(int16_t),
                          &bytesWritten, portMAX_DELAY);
@@ -446,6 +648,12 @@ void AudioEngine::processLoop()
     delete[] outBuf;
     delete[] floatL;
     delete[] floatR;
+    delete[] down16kL;
+    delete[] down16kR;
+    delete[] ns16kIn;
+    delete[] ns16kOut;
+    delete[] up48kL;
+    delete[] up48kR;
 
     mclog::tagInfo(TAG, "audio task exiting");
 }

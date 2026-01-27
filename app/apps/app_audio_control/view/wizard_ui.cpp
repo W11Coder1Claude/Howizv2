@@ -238,7 +238,7 @@ void WizardUI::createFilterPanel()
     _hpfSlider = lv_slider_create(_panelFilter);
     lv_obj_set_size(_hpfSlider, 550, 30);
     lv_obj_set_pos(_hpfSlider, 400, 130);
-    lv_slider_set_range(_hpfSlider, 20, 500);
+    lv_slider_set_range(_hpfSlider, 20, 2000);
     lv_slider_set_value(_hpfSlider, 80, LV_ANIM_OFF);
     styleSliderWizard(_hpfSlider);
     lv_obj_add_event_cb(_hpfSlider, onHpfSliderChanged, LV_EVENT_VALUE_CHANGED, this);
@@ -270,19 +270,68 @@ void WizardUI::createFilterPanel()
     _lpfSlider = lv_slider_create(_panelFilter);
     lv_obj_set_size(_lpfSlider, 550, 30);
     lv_obj_set_pos(_lpfSlider, 400, 285);
-    lv_slider_set_range(_lpfSlider, 2000, 20000);
+    lv_slider_set_range(_lpfSlider, 500, 20000);
     lv_slider_set_value(_lpfSlider, 18000, LV_ANIM_OFF);
     styleSliderWizard(_lpfSlider);
     lv_obj_add_event_cb(_lpfSlider, onLpfSliderChanged, LV_EVENT_VALUE_CHANGED, this);
 
     _lpfValueLabel = createValueLabel(_panelFilter, "18000 Hz", 970, 285);
 
+    // ── Divider ──
+    createDiamondDivider(_panelFilter, 365, 800);
+
+    // ── NS Section ──
+    createSectionLabel(_panelFilter, "NOISE SUPPRESSION", 80, 390);
+
+    // NS Toggle button
+    _nsToggle = lv_btn_create(_panelFilter);
+    lv_obj_set_size(_nsToggle, 130, 50);
+    lv_obj_set_pos(_nsToggle, 80, 425);
+    styleToggleWizard(_nsToggle);
+    lv_obj_add_event_cb(_nsToggle, onNsToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* nsToggleLbl = lv_label_create(_nsToggle);
+    lv_label_set_text(nsToggleLbl, "NS OFF");
+    lv_obj_set_style_text_font(nsToggleLbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(nsToggleLbl);
+
+    // NS Mode label
+    createValueLabel(_panelFilter, "Mode:", 280, 435);
+
+    // NS Mode buttons (MILD / MEDIUM / AGGRESSIVE)
+    auto makeNsModeBtn = [&](const char* label, int x, int modeIdx) -> lv_obj_t* {
+        lv_obj_t* btn = lv_btn_create(_panelFilter);
+        lv_obj_set_size(btn, 160, 50);
+        lv_obj_set_pos(btn, x, 425);
+        styleToggleWizard(btn);
+        lv_obj_set_user_data(btn, (void*)(intptr_t)modeIdx);
+        lv_obj_add_event_cb(btn, onNsModeClicked, LV_EVENT_CLICKED, this);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, label);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(LAVENDER), LV_PART_MAIN);
+        lv_obj_center(lbl);
+
+        return btn;
+    };
+
+    _nsModeBtn0 = makeNsModeBtn("MILD", 380, 0);
+    _nsModeBtn1 = makeNsModeBtn("MEDIUM", 560, 1);
+    _nsModeBtn2 = makeNsModeBtn("AGGRESSIVE", 740, 2);
+
+    // Highlight default mode (MEDIUM)
+    _nsActiveMode = 1;
+    lv_obj_set_style_border_color(_nsModeBtn1, lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+    lv_obj_t* midChild = lv_obj_get_child(_nsModeBtn1, 0);
+    if (midChild) lv_obj_set_style_text_color(midChild, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+
     // Decorative note at bottom
     lv_obj_t* noteLabel = lv_label_create(_panelFilter);
-    lv_label_set_text(noteLabel, "Butterworth filters (Q = 0.707) for flat passband response");
+    lv_label_set_text(noteLabel, "Butterworth filters (Q = 0.707)  |  NS: ESP-SR WebRTC @ 16kHz");
     lv_obj_set_style_text_font(noteLabel, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(noteLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
-    lv_obj_set_pos(noteLabel, cx - 220, CONTENT_H - 60);
+    lv_obj_set_pos(noteLabel, cx - 250, CONTENT_H - 60);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -537,14 +586,14 @@ void WizardUI::createFooter()
 
     // Block size
     lv_obj_t* bsLabel = lv_label_create(_footerBar);
-    lv_label_set_text(bsLabel, "Block: 512");
+    lv_label_set_text(bsLabel, "Block: 480");
     lv_obj_set_style_text_font(bsLabel, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(bsLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
     lv_obj_set_pos(bsLabel, 450, 10);
 
     // Latency
     lv_obj_t* ltLabel = lv_label_create(_footerBar);
-    lv_label_set_text(ltLabel, "Latency: ~10.7ms");
+    lv_label_set_text(ltLabel, "Latency: ~10.0ms");
     lv_obj_set_style_text_font(ltLabel, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(ltLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
     lv_obj_set_pos(ltLabel, 620, 10);
@@ -943,5 +992,53 @@ void WizardUI::onMicGainSliderChanged(lv_event_t* e)
         char buf[8];
         snprintf(buf, sizeof(buf), "%d", val);
         lv_label_set_text(ui->_micGainValueLabel, buf);
+    }
+}
+
+void WizardUI::onNsToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    (void)ui;
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.nsEnabled;
+    engine.setNsEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "NS ON" : "NS OFF");
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#endif
+}
+
+void WizardUI::onNsModeClicked(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int mode = (int)(intptr_t)lv_obj_get_user_data(btn);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNsMode(mode);
+#endif
+
+    ui->_nsActiveMode = mode;
+
+    // Update button highlights
+    lv_obj_t* btns[] = {ui->_nsModeBtn0, ui->_nsModeBtn1, ui->_nsModeBtn2};
+    for (int i = 0; i < 3; i++) {
+        if (!btns[i]) continue;
+        if (i == mode) {
+            lv_obj_set_style_border_color(btns[i], lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+            lv_obj_t* child = lv_obj_get_child(btns[i], 0);
+            if (child) lv_obj_set_style_text_color(child, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+        } else {
+            lv_obj_set_style_border_color(btns[i], lv_color_hex(GOLD), LV_PART_MAIN);
+            lv_obj_t* child = lv_obj_get_child(btns[i], 0);
+            if (child) lv_obj_set_style_text_color(child, lv_color_hex(LAVENDER), LV_PART_MAIN);
+        }
     }
 }

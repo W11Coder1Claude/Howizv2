@@ -20,7 +20,7 @@
  * │ ══════ │  Panel 3: OUTPUT - Volume, Gain, VU meters            │
  * │ OUTPUT │                                                       │
  * ├────────┴────────────────────────────────────────────────────────┤
- * │  ◇ HP: --- ◇  ◇ 48kHz ◇  ◇ Block: 512 ◇                     │
+ * │  ◇ HP: --- ◇  ◇ 48kHz ◇  ◇ Block: 480 ◇                     │
  * └─────────────────────────────────────────────────────────────────┘
  */
 class WizardUI {
@@ -85,6 +85,14 @@ private:
     lv_obj_t* _lpfSlider = nullptr;
     lv_obj_t* _lpfValueLabel = nullptr;
 
+    // NS controls (on filter panel)
+    lv_obj_t* _nsToggle = nullptr;
+    lv_obj_t* _nsModeBtn0 = nullptr;
+    lv_obj_t* _nsModeBtn1 = nullptr;
+    lv_obj_t* _nsModeBtn2 = nullptr;
+    lv_obj_t* _nsModeLabel = nullptr;
+    int _nsActiveMode = 1;
+
     // EQ panel controls
     lv_obj_t* _eqLowSlider = nullptr;
     lv_obj_t* _eqLowLabel = nullptr;
@@ -140,4 +148,6 @@ private:
     static void onVolumeSliderChanged(lv_event_t* e);
     static void onGainSliderChanged(lv_event_t* e);
     static void onMicGainSliderChanged(lv_event_t* e);
+    static void onNsToggle(lv_event_t* e);
+    static void onNsModeClicked(lv_event_t* e);
 };
