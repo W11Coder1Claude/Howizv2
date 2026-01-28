@@ -15,7 +15,7 @@
  * Runs a continuous mic→DSP→headphone pipeline on a dedicated FreeRTOS task (Core 1).
  * Bypasses the HAL audio API for direct BSP codec access (streaming, not batch).
  *
- * DSP chain: HPF → LPF → EQ(3-band) → [NS] → OutputGain → Clamp → Mute
+ * DSP chain: HPF → LPF → EQ(3-band) → [VoiceExclusion] → [NS] → OutputGain → Clamp → Mute
  */
 
 struct AudioEngineParams {
@@ -37,6 +37,18 @@ struct AudioEngineParams {
     bool  nsEnabled       = false;
     int   nsMode          = 1;       // 0=Mild, 1=Medium, 2=Aggressive
 
+    // Voice Exclusion (NLMS adaptive filter @ 16kHz, uses headset mic as reference)
+    bool  veEnabled        = false;
+    float veBlend          = 0.7f;     // 0.0–1.0: mix of original vs cleaned
+    float veStepSize       = 0.1f;     // 0.01–1.0: NLMS adaptation rate
+    int   veFilterLength   = 128;      // 16–512 taps (at 16kHz: 128 taps = 8ms)
+    float veMaxAttenuation = 0.8f;     // 0.0–1.0: safety limit
+
+    // Voice Exclusion - Reference signal conditioning (applied to HP mic before NLMS)
+    float veRefGain        = 1.0f;     // 0.1–5.0: reference signal gain multiplier
+    float veRefHpf         = 80.0f;    // 20–500 Hz: reference high-pass filter
+    float veRefLpf         = 4000.0f;  // 1000–8000 Hz: reference low-pass filter
+
     // Output
     float outputGain      = 1.0f;    // Linear (0.0-2.0)
     int   outputVolume    = 80;      // Codec volume (0-100)
@@ -48,6 +60,8 @@ struct AudioLevels {
     float rmsRight  = 0.0f;
     float peakLeft  = 0.0f;
     float peakRight = 0.0f;
+    float rmsHP     = 0.0f;  // Headphone mic level (for VE reference monitoring)
+    float peakHP    = 0.0f;
 };
 
 class AudioEngine {
@@ -72,6 +86,14 @@ public:
     void setEqHigh(float gainDb);
     void setNsEnabled(bool enabled);
     void setNsMode(int mode);
+    void setVeEnabled(bool enabled);
+    void setVeBlend(float blend);
+    void setVeStepSize(float stepSize);
+    void setVeFilterLength(int taps);
+    void setVeMaxAttenuation(float atten);
+    void setVeRefGain(float gain);
+    void setVeRefHpf(float freq);
+    void setVeRefLpf(float freq);
     void setOutputGain(float gain);
     void setOutputVolume(int vol);
     void setMute(bool mute);
@@ -108,6 +130,10 @@ private:
     Biquad _eqMidL, _eqMidR;
     Biquad _eqHighL, _eqHighR;
 
+    // VE reference signal conditioning filters (mono, applied to HP mic)
+    Biquad _veRefHpfBq;
+    Biquad _veRefLpfBq;
+
     // State
     AudioEngineParams _params;
     AudioLevels _levels;
@@ -128,4 +154,8 @@ private:
     // NS handles (opaque pointers, typed in .cpp via esp_ns.h)
     void* _nsHandleL = nullptr;
     void* _nsHandleR = nullptr;
+
+    // NLMS Voice Exclusion filter instances (opaque, typed in .cpp)
+    void* _nlmsL = nullptr;
+    void* _nlmsR = nullptr;
 };

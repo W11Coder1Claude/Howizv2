@@ -18,7 +18,9 @@
  * │ ══════ │  Panel 1: FILTERS - HPF/LPF controls                 │
  * │ EQ     │  Panel 2: EQUALIZER - 3-band parametric              │
  * │ ══════ │  Panel 3: OUTPUT - Volume, Gain, VU meters            │
- * │ OUTPUT │                                                       │
+ * │ OUTPUT │  Panel 4: VOICE - Voice Exclusion (NLMS)              │
+ * │ ══════ │                                                       │
+ * │ VOICE  │                                                       │
  * ├────────┴────────────────────────────────────────────────────────┤
  * │  ◇ HP: --- ◇  ◇ 48kHz ◇  ◇ Block: 480 ◇                     │
  * └─────────────────────────────────────────────────────────────────┘
@@ -69,6 +71,7 @@ private:
     lv_obj_t* _navBtnFilter = nullptr;
     lv_obj_t* _navBtnEq = nullptr;
     lv_obj_t* _navBtnOutput = nullptr;
+    lv_obj_t* _navBtnVoice = nullptr;
     int _activePanel = 0;
 
     // Content panels
@@ -76,6 +79,7 @@ private:
     lv_obj_t* _panelFilter = nullptr;
     lv_obj_t* _panelEq = nullptr;
     lv_obj_t* _panelOutput = nullptr;
+    lv_obj_t* _panelVoice = nullptr;
 
     // Filter panel controls
     lv_obj_t* _hpfToggle = nullptr;
@@ -113,6 +117,30 @@ private:
     lv_obj_t* _meterPeakL = nullptr;
     lv_obj_t* _meterPeakR = nullptr;
 
+    // Voice Exclusion panel controls
+    lv_obj_t* _veToggle = nullptr;
+    lv_obj_t* _veHpStatusLabel = nullptr;
+    // Reference signal controls
+    lv_obj_t* _veRefGainSlider = nullptr;
+    lv_obj_t* _veRefGainValueLabel = nullptr;
+    lv_obj_t* _veRefHpfSlider = nullptr;
+    lv_obj_t* _veRefHpfValueLabel = nullptr;
+    lv_obj_t* _veRefLpfSlider = nullptr;
+    lv_obj_t* _veRefLpfValueLabel = nullptr;
+    lv_obj_t* _veHpMeterBar = nullptr;
+    lv_obj_t* _veHpMeterPeak = nullptr;
+    // Cancellation controls
+    lv_obj_t* _veBlendSlider = nullptr;
+    lv_obj_t* _veBlendValueLabel = nullptr;
+    lv_obj_t* _veStepSlider = nullptr;
+    lv_obj_t* _veStepValueLabel = nullptr;
+    lv_obj_t* _veFilterBtn32 = nullptr;
+    lv_obj_t* _veFilterBtn64 = nullptr;
+    lv_obj_t* _veFilterBtn128 = nullptr;
+    int _veActiveFilterLen = 128;
+    lv_obj_t* _veAttenSlider = nullptr;
+    lv_obj_t* _veAttenValueLabel = nullptr;
+
     // Footer
     lv_obj_t* _footerBar = nullptr;
     lv_obj_t* _hpStatusLabel = nullptr;
@@ -124,6 +152,7 @@ private:
     void createFilterPanel();
     void createEqPanel();
     void createOutputPanel();
+    void createVoicePanel();
     void createFooter();
     void showPanel(int index);
     void updateNavHighlight();
@@ -150,4 +179,12 @@ private:
     static void onMicGainSliderChanged(lv_event_t* e);
     static void onNsToggle(lv_event_t* e);
     static void onNsModeClicked(lv_event_t* e);
+    static void onVeToggle(lv_event_t* e);
+    static void onVeRefGainChanged(lv_event_t* e);
+    static void onVeRefHpfChanged(lv_event_t* e);
+    static void onVeRefLpfChanged(lv_event_t* e);
+    static void onVeBlendChanged(lv_event_t* e);
+    static void onVeStepChanged(lv_event_t* e);
+    static void onVeFilterLenClicked(lv_event_t* e);
+    static void onVeAttenChanged(lv_event_t* e);
 };

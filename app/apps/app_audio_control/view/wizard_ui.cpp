@@ -46,13 +46,53 @@ void WizardUI::update()
     updateMeters();
 
     // Update headphone status
+    bool hp = false;
     if (_hpStatusLabel) {
-        bool hp = GetHAL()->headPhoneDetect();
+        hp = GetHAL()->headPhoneDetect();
         lv_label_set_text(_hpStatusLabel,
             hp ? "HP: Connected" : "HP: ---");
         lv_obj_set_style_text_color(_hpStatusLabel,
             lv_color_hex(hp ? GOLD_BRIGHT : MUTED_TEXT), LV_PART_MAIN);
     }
+
+    // Update HP mic status on voice panel
+    if (_veHpStatusLabel) {
+        lv_label_set_text(_veHpStatusLabel,
+            hp ? "HP MIC: Available" : "HP MIC: Not Available");
+        lv_obj_set_style_text_color(_veHpStatusLabel,
+            lv_color_hex(hp ? METER_GREEN : METER_RED), LV_PART_MAIN);
+    }
+
+    // Update HP mic level meter
+#ifdef ESP_PLATFORM
+    if (_veHpMeterBar || _veHpMeterPeak) {
+        AudioLevels levels = AudioEngine::getInstance().getLevels();
+        constexpr int HP_METER_MAX_W = 546;  // sliderW(550) - 4px borders
+        constexpr float DB_MIN = -60.0f;
+
+        auto levelToWidth = [](float level, float dbMin, int maxWidth) -> int {
+            if (level < 0.00001f) return 0;
+            float db = 20.0f * log10f(level);
+            if (db < dbMin) return 0;
+            float norm = (db - dbMin) / (0.0f - dbMin);
+            return (int)(norm * maxWidth);
+        };
+
+        int wHP = levelToWidth(levels.rmsHP, DB_MIN, HP_METER_MAX_W);
+        int pHP = levelToWidth(levels.peakHP, DB_MIN, HP_METER_MAX_W);
+
+        if (_veHpMeterBar) {
+            lv_obj_set_width(_veHpMeterBar, wHP > 0 ? wHP : 1);
+            // Color: green if signal present, dim if near-silent
+            float db = 20.0f * log10f(levels.rmsHP + 0.00001f);
+            uint32_t color = (db > -3.0f) ? METER_RED : (db > -20.0f) ? METER_GREEN : MUTED_TEXT;
+            lv_obj_set_style_bg_color(_veHpMeterBar, lv_color_hex(color), LV_PART_MAIN);
+        }
+        if (_veHpMeterPeak) {
+            lv_obj_set_x(_veHpMeterPeak, pHP > 2 ? pHP : 2);
+        }
+    }
+#endif
 }
 
 void WizardUI::destroy()
@@ -155,9 +195,10 @@ void WizardUI::createNavSidebar()
     _navBtnFilter = makeNavBtn("FILTER", startY, 0);
     _navBtnEq     = makeNavBtn("EQ", startY + 100, 1);
     _navBtnOutput = makeNavBtn("OUTPUT", startY + 200, 2);
+    _navBtnVoice  = makeNavBtn("VOICE", startY + 300, 3);
 
     // Decorative dividers between buttons
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         lv_obj_t* div = lv_obj_create(_navPanel);
         lv_obj_remove_style_all(div);
         lv_obj_set_size(div, NAV_W - 30, 1);
@@ -196,10 +237,12 @@ void WizardUI::createContentArea()
     _panelFilter = makePanel();
     _panelEq     = makePanel();
     _panelOutput = makePanel();
+    _panelVoice  = makePanel();
 
     createFilterPanel();
     createEqPanel();
     createOutputPanel();
+    createVoicePanel();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -554,6 +597,185 @@ void WizardUI::createOutputPanel()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Panel 4: VOICE EXCLUSION (NLMS adaptive filter)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void WizardUI::createVoicePanel()
+{
+    int cx = CONTENT_W / 2;
+    int sliderX = 300;
+    int sliderW = 550;
+    int valX = 870;
+
+    // ── Title + HP Status + VE Toggle (row 1) ──
+    createSectionLabel(_panelVoice, "VOICE EXCLUSION", cx - 100, 10);
+
+    _veHpStatusLabel = lv_label_create(_panelVoice);
+    lv_label_set_text(_veHpStatusLabel, "HP MIC: ---");
+    lv_obj_set_style_text_font(_veHpStatusLabel, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_veHpStatusLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
+    lv_obj_set_pos(_veHpStatusLabel, 700, 15);
+
+    _veToggle = lv_btn_create(_panelVoice);
+    lv_obj_set_size(_veToggle, 110, 40);
+    lv_obj_set_pos(_veToggle, 80, 8);
+    styleToggleWizard(_veToggle);
+    lv_obj_add_event_cb(_veToggle, onVeToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* veToggleLbl = lv_label_create(_veToggle);
+    lv_label_set_text(veToggleLbl, "VE OFF");
+    lv_obj_set_style_text_font(veToggleLbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_center(veToggleLbl);
+
+    // ── Divider ──
+    createDiamondDivider(_panelVoice, 55, 800);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // REFERENCE SIGNAL section
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelVoice, "REFERENCE SIGNAL (HP MIC)", 80, 65);
+
+    // HP Mic Gain
+    createValueLabel(_panelVoice, "Gain:", 80, 100);
+    _veRefGainSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veRefGainSlider, sliderW, 26);
+    lv_obj_set_pos(_veRefGainSlider, sliderX, 100);
+    lv_slider_set_range(_veRefGainSlider, 1, 50);  // 0.1x - 5.0x
+    lv_slider_set_value(_veRefGainSlider, 10, LV_ANIM_OFF);  // 1.0x
+    styleSliderWizard(_veRefGainSlider);
+    lv_obj_add_event_cb(_veRefGainSlider, onVeRefGainChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veRefGainValueLabel = createValueLabel(_panelVoice, "1.0x", valX, 100);
+
+    // Ref HPF
+    createValueLabel(_panelVoice, "HPF:", 80, 140);
+    _veRefHpfSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veRefHpfSlider, sliderW, 26);
+    lv_obj_set_pos(_veRefHpfSlider, sliderX, 140);
+    lv_slider_set_range(_veRefHpfSlider, 20, 500);
+    lv_slider_set_value(_veRefHpfSlider, 80, LV_ANIM_OFF);
+    styleSliderWizard(_veRefHpfSlider);
+    lv_obj_add_event_cb(_veRefHpfSlider, onVeRefHpfChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veRefHpfValueLabel = createValueLabel(_panelVoice, "80 Hz", valX, 140);
+
+    // Ref LPF
+    createValueLabel(_panelVoice, "LPF:", 80, 180);
+    _veRefLpfSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veRefLpfSlider, sliderW, 26);
+    lv_obj_set_pos(_veRefLpfSlider, sliderX, 180);
+    lv_slider_set_range(_veRefLpfSlider, 1000, 8000);
+    lv_slider_set_value(_veRefLpfSlider, 4000, LV_ANIM_OFF);
+    styleSliderWizard(_veRefLpfSlider);
+    lv_obj_add_event_cb(_veRefLpfSlider, onVeRefLpfChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veRefLpfValueLabel = createValueLabel(_panelVoice, "4000 Hz", valX, 180);
+
+    // HP Mic Level Meter
+    createValueLabel(_panelVoice, "Level:", 80, 220);
+    lv_obj_t* hpMeterBg = lv_obj_create(_panelVoice);
+    lv_obj_remove_style_all(hpMeterBg);
+    lv_obj_set_size(hpMeterBg, sliderW, 24);
+    lv_obj_set_pos(hpMeterBg, sliderX, 220);
+    lv_obj_set_style_bg_color(hpMeterBg, lv_color_hex(0x1A1A2E), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(hpMeterBg, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(hpMeterBg, 3, LV_PART_MAIN);
+    lv_obj_set_style_border_color(hpMeterBg, lv_color_hex(DARK_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_border_width(hpMeterBg, 1, LV_PART_MAIN);
+    lv_obj_remove_flag(hpMeterBg, LV_OBJ_FLAG_SCROLLABLE);
+
+    _veHpMeterBar = lv_obj_create(hpMeterBg);
+    lv_obj_remove_style_all(_veHpMeterBar);
+    lv_obj_set_size(_veHpMeterBar, 1, 20);
+    lv_obj_set_pos(_veHpMeterBar, 2, 2);
+    lv_obj_set_style_bg_color(_veHpMeterBar, lv_color_hex(METER_GREEN), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(_veHpMeterBar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(_veHpMeterBar, 2, LV_PART_MAIN);
+
+    _veHpMeterPeak = lv_obj_create(hpMeterBg);
+    lv_obj_remove_style_all(_veHpMeterPeak);
+    lv_obj_set_size(_veHpMeterPeak, 3, 20);
+    lv_obj_set_pos(_veHpMeterPeak, 2, 2);
+    lv_obj_set_style_bg_color(_veHpMeterPeak, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(_veHpMeterPeak, LV_OPA_COVER, LV_PART_MAIN);
+
+    // ── Divider ──
+    createDiamondDivider(_panelVoice, 258, 800);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // CANCELLATION section
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelVoice, "CANCELLATION", 80, 268);
+
+    // Blend
+    createValueLabel(_panelVoice, "Blend:", 80, 300);
+    _veBlendSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veBlendSlider, sliderW, 26);
+    lv_obj_set_pos(_veBlendSlider, sliderX, 300);
+    lv_slider_set_range(_veBlendSlider, 0, 100);
+    lv_slider_set_value(_veBlendSlider, 70, LV_ANIM_OFF);
+    styleSliderWizard(_veBlendSlider);
+    lv_obj_add_event_cb(_veBlendSlider, onVeBlendChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veBlendValueLabel = createValueLabel(_panelVoice, "70%", valX, 300);
+
+    // Step Size
+    createValueLabel(_panelVoice, "Step:", 80, 340);
+    _veStepSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veStepSlider, sliderW, 26);
+    lv_obj_set_pos(_veStepSlider, sliderX, 340);
+    lv_slider_set_range(_veStepSlider, 1, 100);
+    lv_slider_set_value(_veStepSlider, 10, LV_ANIM_OFF);
+    styleSliderWizard(_veStepSlider);
+    lv_obj_add_event_cb(_veStepSlider, onVeStepChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veStepValueLabel = createValueLabel(_panelVoice, "0.10", valX, 340);
+
+    // Max Attenuation
+    createValueLabel(_panelVoice, "Max Atten:", 80, 380);
+    _veAttenSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veAttenSlider, sliderW, 26);
+    lv_obj_set_pos(_veAttenSlider, sliderX, 380);
+    lv_slider_set_range(_veAttenSlider, 0, 100);
+    lv_slider_set_value(_veAttenSlider, 80, LV_ANIM_OFF);
+    styleSliderWizard(_veAttenSlider);
+    lv_obj_add_event_cb(_veAttenSlider, onVeAttenChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veAttenValueLabel = createValueLabel(_panelVoice, "80%", valX, 380);
+
+    // Filter Length Buttons
+    createValueLabel(_panelVoice, "Taps:", 80, 425);
+
+    auto makeFilterBtn = [&](const char* label, int x, int taps) -> lv_obj_t* {
+        lv_obj_t* btn = lv_btn_create(_panelVoice);
+        lv_obj_set_size(btn, 130, 42);
+        lv_obj_set_pos(btn, x, 420);
+        styleToggleWizard(btn);
+        lv_obj_set_user_data(btn, (void*)(intptr_t)taps);
+        lv_obj_add_event_cb(btn, onVeFilterLenClicked, LV_EVENT_CLICKED, this);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, label);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(LAVENDER), LV_PART_MAIN);
+        lv_obj_center(lbl);
+
+        return btn;
+    };
+
+    _veFilterBtn32  = makeFilterBtn("64", sliderX, 64);
+    _veFilterBtn64  = makeFilterBtn("128", sliderX + 150, 128);
+    _veFilterBtn128 = makeFilterBtn("256", sliderX + 300, 256);
+
+    // Highlight default (128 taps = 8ms at 16kHz)
+    _veActiveFilterLen = 128;
+    lv_obj_set_style_border_color(_veFilterBtn64, lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+    lv_obj_t* defChild = lv_obj_get_child(_veFilterBtn64, 0);
+    if (defChild) lv_obj_set_style_text_color(defChild, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+
+    // ── Descriptive note ──
+    lv_obj_t* noteLabel = lv_label_create(_panelVoice);
+    lv_label_set_text(noteLabel, "NLMS @ 16kHz  |  Condition the ref signal so NLMS can match your voice");
+    lv_obj_set_style_text_font(noteLabel, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(noteLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
+    lv_obj_set_pos(noteLabel, 80, CONTENT_H - 50);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Footer bar
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -610,11 +832,13 @@ void WizardUI::showPanel(int index)
     if (_panelFilter) lv_obj_add_flag(_panelFilter, LV_OBJ_FLAG_HIDDEN);
     if (_panelEq)     lv_obj_add_flag(_panelEq, LV_OBJ_FLAG_HIDDEN);
     if (_panelOutput) lv_obj_add_flag(_panelOutput, LV_OBJ_FLAG_HIDDEN);
+    if (_panelVoice)  lv_obj_add_flag(_panelVoice, LV_OBJ_FLAG_HIDDEN);
 
     switch (index) {
         case 0: if (_panelFilter) lv_obj_remove_flag(_panelFilter, LV_OBJ_FLAG_HIDDEN); break;
         case 1: if (_panelEq)     lv_obj_remove_flag(_panelEq, LV_OBJ_FLAG_HIDDEN); break;
         case 2: if (_panelOutput) lv_obj_remove_flag(_panelOutput, LV_OBJ_FLAG_HIDDEN); break;
+        case 3: if (_panelVoice)  lv_obj_remove_flag(_panelVoice, LV_OBJ_FLAG_HIDDEN); break;
     }
 
     updateNavHighlight();
@@ -622,8 +846,8 @@ void WizardUI::showPanel(int index)
 
 void WizardUI::updateNavHighlight()
 {
-    lv_obj_t* btns[] = {_navBtnFilter, _navBtnEq, _navBtnOutput};
-    for (int i = 0; i < 3; i++) {
+    lv_obj_t* btns[] = {_navBtnFilter, _navBtnEq, _navBtnOutput, _navBtnVoice};
+    for (int i = 0; i < 4; i++) {
         if (!btns[i]) continue;
         if (i == _activePanel) {
             lv_obj_set_style_bg_color(btns[i], lv_color_hex(0x1A1540), LV_PART_MAIN);
@@ -1040,5 +1264,164 @@ void WizardUI::onNsModeClicked(lv_event_t* e)
             lv_obj_t* child = lv_obj_get_child(btns[i], 0);
             if (child) lv_obj_set_style_text_color(child, lv_color_hex(LAVENDER), LV_PART_MAIN);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Voice Exclusion callbacks
+// ─────────────────────────────────────────────────────────────────────────────
+
+void WizardUI::onVeToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    (void)ui;
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.veEnabled;
+    engine.setVeEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "VE ON" : "VE OFF");
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#endif
+}
+
+void WizardUI::onVeBlendChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);  // 0-100
+    float blend = (float)val / 100.0f;      // 0.0-1.0
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeBlend(blend);
+#endif
+
+    if (ui->_veBlendValueLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", val);
+        lv_label_set_text(ui->_veBlendValueLabel, buf);
+    }
+}
+
+void WizardUI::onVeStepChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);   // 1-100
+    float step = (float)val / 100.0f;        // 0.01-1.0
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeStepSize(step);
+#endif
+
+    if (ui->_veStepValueLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.2f", (double)step);
+        lv_label_set_text(ui->_veStepValueLabel, buf);
+    }
+}
+
+void WizardUI::onVeFilterLenClicked(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int taps = (int)(intptr_t)lv_obj_get_user_data(btn);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeFilterLength(taps);
+#endif
+
+    ui->_veActiveFilterLen = taps;
+
+    // Update button highlights
+    lv_obj_t* btns[] = {ui->_veFilterBtn32, ui->_veFilterBtn64, ui->_veFilterBtn128};
+    int tapValues[] = {64, 128, 256};
+    for (int i = 0; i < 3; i++) {
+        if (!btns[i]) continue;
+        if (tapValues[i] == taps) {
+            lv_obj_set_style_border_color(btns[i], lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+            lv_obj_t* child = lv_obj_get_child(btns[i], 0);
+            if (child) lv_obj_set_style_text_color(child, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+        } else {
+            lv_obj_set_style_border_color(btns[i], lv_color_hex(GOLD), LV_PART_MAIN);
+            lv_obj_t* child = lv_obj_get_child(btns[i], 0);
+            if (child) lv_obj_set_style_text_color(child, lv_color_hex(LAVENDER), LV_PART_MAIN);
+        }
+    }
+}
+
+void WizardUI::onVeAttenChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);   // 0-100
+    float atten = (float)val / 100.0f;       // 0.0-1.0
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeMaxAttenuation(atten);
+#endif
+
+    if (ui->_veAttenValueLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", val);
+        lv_label_set_text(ui->_veAttenValueLabel, buf);
+    }
+}
+
+void WizardUI::onVeRefGainChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);   // 1-50
+    float gain = (float)val / 10.0f;         // 0.1-5.0
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeRefGain(gain);
+#endif
+
+    if (ui->_veRefGainValueLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.1fx", (double)gain);
+        lv_label_set_text(ui->_veRefGainValueLabel, buf);
+    }
+}
+
+void WizardUI::onVeRefHpfChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);   // 20-500
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeRefHpf((float)val);
+#endif
+
+    if (ui->_veRefHpfValueLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_veRefHpfValueLabel, buf);
+    }
+}
+
+void WizardUI::onVeRefLpfChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);   // 1000-8000
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeRefLpf((float)val);
+#endif
+
+    if (ui->_veRefLpfValueLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_veRefLpfValueLabel, buf);
     }
 }

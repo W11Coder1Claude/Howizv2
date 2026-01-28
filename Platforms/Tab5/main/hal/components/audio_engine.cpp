@@ -104,6 +104,85 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// NLMS Adaptive Filter (Voice Exclusion)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class NlmsFilter {
+public:
+    void init(int filterLength) {
+        destroy();
+        _len = filterLength;
+        _weights = new float[_len]();     // zero-initialized
+        _refBuf = new float[_len]();      // circular reference buffer
+        _pos = 0;
+    }
+
+    void destroy() {
+        delete[] _weights;
+        delete[] _refBuf;
+        _weights = nullptr;
+        _refBuf = nullptr;
+        _len = 0;
+        _pos = 0;
+    }
+
+    void reset() {
+        if (_weights) std::memset(_weights, 0, _len * sizeof(float));
+        if (_refBuf)  std::memset(_refBuf, 0, _len * sizeof(float));
+        _pos = 0;
+    }
+
+    // Returns the voice estimate (what should be subtracted from primary).
+    // Weight update uses the true (unclamped) error for correct convergence.
+    float process(float ref, float primary, float stepSize) {
+        if (!_weights || !_refBuf || _len <= 0) return 0.0f;
+
+        // 1. Store reference sample in circular buffer
+        _refBuf[_pos] = ref;
+
+        // 2. Compute estimate = dot(weights, refBuffer)
+        float estimate = 0.0f;
+        float power = 0.0f;
+        for (int i = 0; i < _len; i++) {
+            int idx = (_pos - i + _len) % _len;
+            float r = _refBuf[idx];
+            estimate += _weights[i] * r;
+            power += r * r;
+        }
+
+        // 3. True error for weight update (never clamped)
+        float error = primary - estimate;
+
+        // 4. Normalized step: stepSize / (power + floor)
+        float normStep = stepSize / (power + 1e-6f);
+
+        // 5. Update weights using true error
+        for (int i = 0; i < _len; i++) {
+            int idx = (_pos - i + _len) % _len;
+            _weights[i] += normStep * error * _refBuf[idx];
+            // Coefficient sanity check
+            if (fabsf(_weights[i]) > 10.0f) {
+                _weights[i] = 0.0f;
+            }
+        }
+
+        // Advance circular buffer position
+        _pos = (_pos + 1) % _len;
+
+        // Return the estimate (caller subtracts with blend + attenuation clamp)
+        return estimate;
+    }
+
+    bool isInitialized() const { return _weights != nullptr; }
+
+private:
+    float* _weights = nullptr;
+    float* _refBuf = nullptr;
+    int _len = 0;
+    int _pos = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Singleton
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -207,6 +286,10 @@ void AudioEngine::recalcAllCoeffs()
 
     calcPeakEqCoeffs(_eqHighL, 4000.0f, _params.eqHighGain, 1.4f, SAMPLE_RATE);
     calcPeakEqCoeffs(_eqHighR, 4000.0f, _params.eqHighGain, 1.4f, SAMPLE_RATE);
+
+    // VE reference signal conditioning filters (mono, applied to HP mic at 48kHz)
+    calcHpfCoeffs(_veRefHpfBq, _params.veRefHpf, SAMPLE_RATE);
+    calcLpfCoeffs(_veRefLpfBq, _params.veRefLpf, SAMPLE_RATE);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,6 +345,7 @@ void AudioEngine::start()
     _eqLowL.reset(); _eqLowR.reset();
     _eqMidL.reset(); _eqMidR.reset();
     _eqHighL.reset(); _eqHighR.reset();
+    _veRefHpfBq.reset(); _veRefLpfBq.reset();
 
     // Create NS handles if NS is enabled
     if (_params.nsEnabled) {
@@ -288,6 +372,18 @@ void AudioEngine::stop()
 
     // Destroy NS handles
     destroyNsHandles(_nsHandleL, _nsHandleR);
+
+    // Destroy NLMS filters
+    if (_nlmsL) {
+        static_cast<NlmsFilter*>(_nlmsL)->destroy();
+        delete static_cast<NlmsFilter*>(_nlmsL);
+        _nlmsL = nullptr;
+    }
+    if (_nlmsR) {
+        static_cast<NlmsFilter*>(_nlmsR)->destroy();
+        delete static_cast<NlmsFilter*>(_nlmsR);
+        _nlmsR = nullptr;
+    }
 
     // Mute codec output
     bsp_codec_config_t* codec = bsp_get_codec_handle();
@@ -388,6 +484,62 @@ void AudioEngine::setNsMode(int mode)
     _paramsChanged = true;
 }
 
+void AudioEngine::setVeEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeBlend(float blend)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veBlend = std::clamp(blend, 0.0f, 1.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeStepSize(float stepSize)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veStepSize = std::clamp(stepSize, 0.01f, 1.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeFilterLength(int taps)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veFilterLength = std::clamp(taps, 16, 512);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeMaxAttenuation(float atten)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veMaxAttenuation = std::clamp(atten, 0.0f, 1.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeRefGain(float gain)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veRefGain = std::clamp(gain, 0.1f, 5.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeRefHpf(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veRefHpf = std::clamp(freq, 20.0f, 500.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeRefLpf(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veRefLpf = std::clamp(freq, 1000.0f, 8000.0f);
+    _paramsChanged = true;
+}
+
 void AudioEngine::setOutputGain(float gain)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -445,6 +597,7 @@ void AudioEngine::processLoop()
     int16_t* outBuf = new int16_t[BLOCK_SIZE * NUM_CHANNELS_OUT];
     float* floatL = new float[BLOCK_SIZE];
     float* floatR = new float[BLOCK_SIZE];
+    float* floatHP = new float[BLOCK_SIZE];  // Headphone mic (CH3) for voice exclusion
 
     // NS processing buffers (16kHz domain)
     float* down16kL = new float[NS_FRAME_16K];
@@ -454,13 +607,31 @@ void AudioEngine::processLoop()
     float* up48kL = new float[BLOCK_SIZE];
     float* up48kR = new float[BLOCK_SIZE];
 
-    // Resamplers
+    // NS Resamplers
     Resampler resamplerDownL, resamplerDownR;
     Resampler resamplerUpL, resamplerUpR;
     resamplerDownL.init(true);
     resamplerDownR.init(true);
     resamplerUpL.init(false);
     resamplerUpR.init(false);
+
+    // VE Resamplers (separate state from NS resamplers)
+    Resampler veResDownL, veResDownR, veResDownHP;
+    Resampler veResUpL, veResUpR;
+    veResDownL.init(true);
+    veResDownR.init(true);
+    veResDownHP.init(true);
+    veResUpL.init(false);
+    veResUpR.init(false);
+
+    // VE 16kHz processing buffers
+    float* veDown16kL  = new float[NS_FRAME_16K];  // 160 samples
+    float* veDown16kR  = new float[NS_FRAME_16K];
+    float* veDown16kHP = new float[NS_FRAME_16K];
+    float* veEst16kL   = new float[NS_FRAME_16K];  // NLMS estimates at 16kHz
+    float* veEst16kR   = new float[NS_FRAME_16K];
+    float* veEstUp48kL = new float[BLOCK_SIZE];     // Upsampled estimates
+    float* veEstUp48kR = new float[BLOCK_SIZE];
 
     mclog::tagInfo(TAG, "buffers allocated: in={}B out={}B", inBufBytes, outBufBytes);
 
@@ -469,6 +640,11 @@ void AudioEngine::processLoop()
     bool localParamsChanged = true;
     bool prevNsEnabled = false;
     int prevNsMode = -1;
+    bool prevVeEnabled = false;
+    int prevVeFilterLength = -1;
+    bool hpDetected = false;
+    int hpDetectCounter = 0;
+    static constexpr int HP_DETECT_INTERVAL = 48;  // check every ~48 blocks (~480ms)
 
     while (true) {
         // Check if we should stop
@@ -510,15 +686,52 @@ void AudioEngine::processLoop()
                 prevNsMode = localParams.nsMode;
             }
 
+            // Handle VE enable/filter-length changes
+            if (localParams.veEnabled != prevVeEnabled ||
+                localParams.veFilterLength != prevVeFilterLength) {
+                if (localParams.veEnabled) {
+                    // Destroy old and create new NLMS filters
+                    if (_nlmsL) {
+                        static_cast<NlmsFilter*>(_nlmsL)->destroy();
+                        delete static_cast<NlmsFilter*>(_nlmsL);
+                    }
+                    if (_nlmsR) {
+                        static_cast<NlmsFilter*>(_nlmsR)->destroy();
+                        delete static_cast<NlmsFilter*>(_nlmsR);
+                    }
+                    auto* nlL = new NlmsFilter();
+                    auto* nlR = new NlmsFilter();
+                    nlL->init(localParams.veFilterLength);
+                    nlR->init(localParams.veFilterLength);
+                    _nlmsL = nlL;
+                    _nlmsR = nlR;
+                    mclog::tagInfo(TAG, "NLMS filters created (taps={})", localParams.veFilterLength);
+                } else {
+                    if (_nlmsL) {
+                        static_cast<NlmsFilter*>(_nlmsL)->destroy();
+                        delete static_cast<NlmsFilter*>(_nlmsL);
+                        _nlmsL = nullptr;
+                    }
+                    if (_nlmsR) {
+                        static_cast<NlmsFilter*>(_nlmsR)->destroy();
+                        delete static_cast<NlmsFilter*>(_nlmsR);
+                        _nlmsR = nullptr;
+                    }
+                }
+                prevVeEnabled = localParams.veEnabled;
+                prevVeFilterLength = localParams.veFilterLength;
+            }
+
             // Recalculate all biquad coefficients
             recalcAllCoeffs();
 
-            mclog::tagInfo(TAG, "params updated: micGain={:.0f} vol={} mute={} hpf={}/{:.0f}Hz lpf={}/{:.0f}Hz eq={:.1f}/{:.1f}/{:.1f}dB ns={}/mode={} gain={:.2f}",
+            mclog::tagInfo(TAG, "params updated: micGain={:.0f} vol={} mute={} hpf={}/{:.0f}Hz lpf={}/{:.0f}Hz eq={:.1f}/{:.1f}/{:.1f}dB ns={}/mode={} ve={}/blend={:.2f} gain={:.2f}",
                 localParams.micGain, localParams.outputVolume, localParams.outputMute,
                 localParams.hpfEnabled, localParams.hpfFrequency,
                 localParams.lpfEnabled, localParams.lpfFrequency,
                 localParams.eqLowGain, localParams.eqMidGain, localParams.eqHighGain,
                 localParams.nsEnabled, localParams.nsMode,
+                localParams.veEnabled, localParams.veBlend,
                 localParams.outputGain);
         }
 
@@ -529,11 +742,12 @@ void AudioEngine::processLoop()
         int samplesRead = bytesRead / (NUM_CHANNELS_IN * sizeof(int16_t));
         if (samplesRead <= 0) continue;
 
-        // ── 2. Extract MIC-L (ch0) and MIC-R (ch2), convert to float [-1.0, 1.0] ──
+        // ── 2. Extract MIC-L (ch0), MIC-R (ch2), MIC-HP (ch3), convert to float [-1.0, 1.0] ──
         constexpr float scale = 1.0f / 32768.0f;
         for (int i = 0; i < samplesRead; i++) {
-            floatL[i] = (float)inBuf[i * NUM_CHANNELS_IN + 0] * scale;  // MIC-L
-            floatR[i] = (float)inBuf[i * NUM_CHANNELS_IN + 2] * scale;  // MIC-R
+            floatL[i]  = (float)inBuf[i * NUM_CHANNELS_IN + 0] * scale;  // MIC-L
+            floatR[i]  = (float)inBuf[i * NUM_CHANNELS_IN + 2] * scale;  // MIC-R
+            floatHP[i] = (float)inBuf[i * NUM_CHANNELS_IN + 3] * scale;  // MIC-HP
         }
 
         // ── 3. Apply HPF ──
@@ -566,7 +780,83 @@ void AudioEngine::processLoop()
             floatR[i] = _eqHighR.process(floatR[i]);
         }
 
-        // ── 6. Noise Suppression (downsample → NS → upsample) ──
+        // ── 6. Reference signal conditioning (applied to HP mic before VE) ──
+        // Apply gain, HPF, LPF to the reference signal so NLMS sees clean voice
+        {
+            float refGain = localParams.veRefGain;
+            for (int i = 0; i < samplesRead; i++) {
+                floatHP[i] *= refGain;
+            }
+            // Bandpass: HPF removes rumble/handling, LPF focuses on voice band
+            for (int i = 0; i < samplesRead; i++) {
+                floatHP[i] = _veRefHpfBq.process(floatHP[i]);
+            }
+            for (int i = 0; i < samplesRead; i++) {
+                floatHP[i] = _veRefLpfBq.process(floatHP[i]);
+            }
+        }
+
+        // ── 6b. HP mic level metering ──
+        {
+            float sumHP = 0.0f, pkHP = 0.0f;
+            for (int i = 0; i < samplesRead; i++) {
+                float absHP = fabsf(floatHP[i]);
+                sumHP += floatHP[i] * floatHP[i];
+                if (absHP > pkHP) pkHP = absHP;
+            }
+            std::lock_guard<std::mutex> lock(_mutex);
+            _levels.rmsHP = sqrtf(sumHP / (float)samplesRead);
+            _levels.peakHP = std::max(pkHP, _levels.peakHP * PEAK_DECAY);
+        }
+
+        // ── 7. Voice Exclusion (NLMS @ 16kHz, uses conditioned HP mic as reference) ──
+        // Poll headphone detect periodically (not every sample)
+        if (++hpDetectCounter >= HP_DETECT_INTERVAL) {
+            hpDetectCounter = 0;
+            hpDetected = bsp_headphone_detect();
+        }
+
+        if (localParams.veEnabled && hpDetected && _nlmsL && _nlmsR && samplesRead == BLOCK_SIZE) {
+            auto* nlL = static_cast<NlmsFilter*>(_nlmsL);
+            auto* nlR = static_cast<NlmsFilter*>(_nlmsR);
+            float blend = localParams.veBlend;
+            float step = localParams.veStepSize;
+            float maxAtt = localParams.veMaxAttenuation;
+
+            // Downsample 48kHz → 16kHz (480 → 160 samples)
+            veResDownL.downsample3(floatL, veDown16kL, NS_FRAME_16K);
+            veResDownR.downsample3(floatR, veDown16kR, NS_FRAME_16K);
+            veResDownHP.downsample3(floatHP, veDown16kHP, NS_FRAME_16K);
+
+            // Run NLMS at 16kHz — returns voice estimate per sample
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                veEst16kL[i] = nlL->process(veDown16kHP[i], veDown16kL[i], step);
+                veEst16kR[i] = nlR->process(veDown16kHP[i], veDown16kR[i], step);
+            }
+
+            // Upsample voice estimates back to 48kHz
+            veResUpL.upsample3(veEst16kL, veEstUp48kL, NS_FRAME_16K);
+            veResUpR.upsample3(veEst16kR, veEstUp48kR, NS_FRAME_16K);
+
+            // Subtract voice estimate from full-bandwidth signal
+            for (int i = 0; i < samplesRead; i++) {
+                // Clamp removal by max attenuation (safety limit)
+                float maxRemL = fabsf(floatL[i]) * maxAtt;
+                float maxRemR = fabsf(floatR[i]) * maxAtt;
+                float remL = std::clamp(veEstUp48kL[i], -maxRemL, maxRemL);
+                float remR = std::clamp(veEstUp48kR[i], -maxRemR, maxRemR);
+
+                // Apply with blend: 0 = no removal, 1 = full removal
+                floatL[i] -= blend * remL;
+                floatR[i] -= blend * remR;
+
+                // NaN protection
+                if (std::isnan(floatL[i])) floatL[i] = 0.0f;
+                if (std::isnan(floatR[i])) floatR[i] = 0.0f;
+            }
+        }
+
+        // ── 8. Noise Suppression (downsample → NS → upsample) ──
         if (localParams.nsEnabled && _nsHandleL && _nsHandleR && samplesRead == BLOCK_SIZE) {
             // Downsample 48kHz → 16kHz (480 → 160 samples)
             resamplerDownL.downsample3(floatL, down16kL, NS_FRAME_16K);
@@ -597,14 +887,14 @@ void AudioEngine::processLoop()
             resamplerUpR.upsample3(down16kR, floatR, NS_FRAME_16K);
         }
 
-        // ── 7. Apply output gain ──
+        // ── 9. Apply output gain ──
         float gain = localParams.outputGain;
         for (int i = 0; i < samplesRead; i++) {
             floatL[i] *= gain;
             floatR[i] *= gain;
         }
 
-        // ── 8. Compute RMS + peak for level metering ──
+        // ── 10. Compute RMS + peak for level metering ──
         float sumL = 0.0f, sumR = 0.0f;
         float pkL = 0.0f, pkR = 0.0f;
         for (int i = 0; i < samplesRead; i++) {
@@ -624,7 +914,7 @@ void AudioEngine::processLoop()
             _levels.peakRight = std::max(pkR, _levels.peakRight * PEAK_DECAY);
         }
 
-        // ── 9. Clamp and convert to int16 stereo output ──
+        // ── 11. Clamp and convert to int16 stereo output ──
         for (int i = 0; i < samplesRead; i++) {
             float l = std::clamp(floatL[i], -1.0f, 1.0f);
             float r = std::clamp(floatR[i], -1.0f, 1.0f);
@@ -632,12 +922,12 @@ void AudioEngine::processLoop()
             outBuf[i * 2 + 1] = (int16_t)(r * 32767.0f);
         }
 
-        // ── 10. Apply mute (zero buffer) ──
+        // ── 12. Apply mute (zero buffer) ──
         if (localParams.outputMute) {
             memset(outBuf, 0, samplesRead * NUM_CHANNELS_OUT * sizeof(int16_t));
         }
 
-        // ── 11. Write to I2S (stereo output) ──
+        // ── 13. Write to I2S (stereo output) ──
         size_t bytesWritten = 0;
         codec->i2s_write(outBuf, samplesRead * NUM_CHANNELS_OUT * sizeof(int16_t),
                          &bytesWritten, portMAX_DELAY);
@@ -648,12 +938,20 @@ void AudioEngine::processLoop()
     delete[] outBuf;
     delete[] floatL;
     delete[] floatR;
+    delete[] floatHP;
     delete[] down16kL;
     delete[] down16kR;
     delete[] ns16kIn;
     delete[] ns16kOut;
     delete[] up48kL;
     delete[] up48kR;
+    delete[] veDown16kL;
+    delete[] veDown16kR;
+    delete[] veDown16kHP;
+    delete[] veEst16kL;
+    delete[] veEst16kR;
+    delete[] veEstUp48kL;
+    delete[] veEstUp48kR;
 
     mclog::tagInfo(TAG, "audio task exiting");
 }
