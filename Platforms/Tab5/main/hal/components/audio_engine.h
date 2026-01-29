@@ -15,7 +15,7 @@
  * Runs a continuous mic→DSP→headphone pipeline on a dedicated FreeRTOS task (Core 1).
  * Bypasses the HAL audio API for direct BSP codec access (streaming, not batch).
  *
- * DSP chain: HPF → LPF → EQ(3-band) → [VoiceExclusion] → [NS] → OutputGain → Clamp → Mute
+ * DSP chain: HPF → LPF → EQ(3-band) → [VoiceExclusion] → [NS] → [AGC] → OutputGain → Clamp → Mute
  */
 
 struct AudioEngineParams {
@@ -37,6 +37,13 @@ struct AudioEngineParams {
     bool  nsEnabled       = false;
     int   nsMode          = 1;       // 0=Mild, 1=Medium, 2=Aggressive
 
+    // AGC (ESP-SR Automatic Gain Control @ 16kHz)
+    bool  agcEnabled           = false;
+    int   agcMode              = 2;      // 0=Saturation, 1=Analog, 2=Digital, 3=Fixed
+    int   agcCompressionGainDb = 9;      // 0–90 dB
+    bool  agcLimiterEnabled    = true;   // Built-in limiter
+    int   agcTargetLevelDbfs   = -3;     // 0 to -31 dBFS
+
     // Voice Exclusion (NLMS adaptive filter @ 16kHz, uses headset mic as reference)
     bool  veEnabled        = false;
     float veBlend          = 0.7f;     // 0.0–1.0: mix of original vs cleaned
@@ -49,9 +56,16 @@ struct AudioEngineParams {
     float veRefHpf         = 80.0f;    // 20–500 Hz: reference high-pass filter
     float veRefLpf         = 4000.0f;  // 1000–8000 Hz: reference low-pass filter
 
+    // Voice Exclusion - AEC mode (alternative to NLMS)
+    int   veMode           = 0;        // 0=NLMS, 1=AEC
+    int   veAecMode        = 1;        // 0=SR_LOW_COST, 1=SR_HIGH_PERF, 3=VOIP_LOW_COST, 4=VOIP_HIGH_PERF
+    int   veAecFilterLen   = 4;        // 1–6 (AEC filter length parameter)
+    bool  veVadEnabled     = true;     // VAD for double-talk detection (AEC mode)
+    int   veVadMode        = 3;        // 0–4: Normal to Very Very Very Aggressive
+
     // Output
-    float outputGain      = 1.0f;    // Linear (0.0-2.0)
-    int   outputVolume    = 80;      // Codec volume (0-100)
+    float outputGain      = 1.5f;    // Linear (0.0-4.0)
+    int   outputVolume    = 100;     // Codec volume (0-100)
     bool  outputMute      = true;    // MUTED by default (safety)
 };
 
@@ -62,6 +76,7 @@ struct AudioLevels {
     float peakRight = 0.0f;
     float rmsHP     = 0.0f;  // Headphone mic level (for VE reference monitoring)
     float peakHP    = 0.0f;
+    bool  vadSpeechDetected = false;  // VAD state (true = speech detected)
 };
 
 class AudioEngine {
@@ -86,6 +101,11 @@ public:
     void setEqHigh(float gainDb);
     void setNsEnabled(bool enabled);
     void setNsMode(int mode);
+    void setAgcEnabled(bool enabled);
+    void setAgcMode(int mode);
+    void setAgcCompressionGain(int gainDb);
+    void setAgcLimiterEnabled(bool enabled);
+    void setAgcTargetLevel(int levelDbfs);
     void setVeEnabled(bool enabled);
     void setVeBlend(float blend);
     void setVeStepSize(float stepSize);
@@ -94,6 +114,11 @@ public:
     void setVeRefGain(float gain);
     void setVeRefHpf(float freq);
     void setVeRefLpf(float freq);
+    void setVeMode(int mode);
+    void setVeAecMode(int mode);
+    void setVeAecFilterLen(int len);
+    void setVeVadEnabled(bool enabled);
+    void setVeVadMode(int mode);
     void setOutputGain(float gain);
     void setOutputVolume(int vol);
     void setMute(bool mute);
@@ -155,7 +180,21 @@ private:
     void* _nsHandleL = nullptr;
     void* _nsHandleR = nullptr;
 
+    // AGC handles (opaque pointers, typed in .cpp via esp_agc.h)
+    void* _agcHandleL = nullptr;
+    void* _agcHandleR = nullptr;
+
     // NLMS Voice Exclusion filter instances (opaque, typed in .cpp)
     void* _nlmsL = nullptr;
     void* _nlmsR = nullptr;
+
+    // AEC handles (opaque pointers, typed in .cpp via esp_aec.h)
+    void* _aecHandleL = nullptr;
+    void* _aecHandleR = nullptr;
+
+    // VAD handle (opaque pointer, typed in .cpp via esp_vad.h)
+    void* _vadHandleRef = nullptr;
+
+    // AEC frame bridging constants
+    static constexpr int AEC_FRAME_16K = 512;  // AEC needs 512 samples @ 16kHz (32ms)
 };

@@ -11,6 +11,7 @@
 
 #ifdef ESP_PLATFORM
 #include "hal/components/audio_engine.h"
+#include "hal/components/profile_manager.h"
 #endif
 
 using namespace mooncake;
@@ -38,6 +39,15 @@ void AppAudioControl::onOpen()
     // Start the audio engine
     AudioEngine::getInstance().start();
     mclog::tagInfo(_tag, "audio engine started");
+
+    // Try to load default profile from SD card
+    {
+        AudioEngineParams params = AudioEngine::getInstance().getParams();
+        if (ProfileManager::loadDefaultProfile(params)) {
+            AudioEngine::getInstance().setParams(params);
+            mclog::tagInfo(_tag, "default profile loaded from SD");
+        }
+    }
 #endif
 
     // Create the wizard UI

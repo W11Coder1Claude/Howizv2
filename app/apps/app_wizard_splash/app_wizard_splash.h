@@ -28,8 +28,8 @@ private:
     lv_obj_t* _sub_label    = nullptr;
     lv_obj_t* _version_label = nullptr;
 
-    // Stars / sparkle particles
-    static constexpr int NUM_STARS = 40;
+    // Stars / sparkle particles (reduced for memory)
+    static constexpr int NUM_STARS = 10;
     struct Star {
         lv_obj_t* obj = nullptr;
         int16_t baseX;

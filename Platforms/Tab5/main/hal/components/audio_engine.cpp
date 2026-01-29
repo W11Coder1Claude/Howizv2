@@ -9,9 +9,13 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <esp_heap_caps.h>
 
 extern "C" {
 #include <esp_ns.h>
+#include <esp_agc.h>
+#include <esp_aec.h>
+#include <esp_vad.h>
 }
 
 static const char* TAG = "AudioEngine";
@@ -321,6 +325,108 @@ static void createNsHandles(void*& handleL, void*& handleR, int mode)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AGC handle management
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void destroyAgcHandles(void*& handleL, void*& handleR)
+{
+    if (handleL) {
+        esp_agc_close(handleL);
+        handleL = nullptr;
+    }
+    if (handleR) {
+        esp_agc_close(handleR);
+        handleR = nullptr;
+    }
+}
+
+static void createAgcHandles(void*& handleL, void*& handleR, int mode)
+{
+    handleL = esp_agc_open(static_cast<agc_mode_t>(mode), 16000);
+    handleR = esp_agc_open(static_cast<agc_mode_t>(mode), 16000);
+    if (!handleL || !handleR) {
+        mclog::tagError("AudioEngine", "failed to create AGC handles (mode={})", mode);
+        destroyAgcHandles(handleL, handleR);
+    } else {
+        mclog::tagInfo("AudioEngine", "AGC handles created (mode={})", mode);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AEC handle management
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void destroyAecHandles(void*& handleL, void*& handleR)
+{
+    if (handleL) {
+        aec_destroy(static_cast<aec_handle_t*>(handleL));
+        handleL = nullptr;
+    }
+    if (handleR) {
+        aec_destroy(static_cast<aec_handle_t*>(handleR));
+        handleR = nullptr;
+    }
+}
+
+static void createAecHandles(void*& handleL, void*& handleR, int aecMode, int filterLen)
+{
+    // ESP-SR AEC: aec_create(sample_rate, filter_length, channel_num, mode)
+    // Each handle processes one mono channel
+    handleL = aec_create(16000, filterLen, 1, static_cast<aec_mode_t>(aecMode));
+    handleR = aec_create(16000, filterLen, 1, static_cast<aec_mode_t>(aecMode));
+    if (!handleL || !handleR) {
+        mclog::tagError("AudioEngine", "failed to create AEC handles (mode={}, flen={})", aecMode, filterLen);
+        destroyAecHandles(handleL, handleR);
+    } else {
+        mclog::tagInfo("AudioEngine", "AEC handles created (mode={}, flen={})", aecMode, filterLen);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VAD handle management
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void destroyVadHandle(void*& handle)
+{
+    if (handle) {
+        vad_destroy(static_cast<vad_handle_t>(handle));
+        handle = nullptr;
+    }
+}
+
+static void createVadHandle(void*& handle, int vadMode)
+{
+    vad_handle_t h = vad_create(static_cast<vad_mode_t>(vadMode));
+    handle = h;
+    if (!handle) {
+        mclog::tagError("AudioEngine", "failed to create VAD handle (mode={})", vadMode);
+    } else {
+        mclog::tagInfo("AudioEngine", "VAD handle created (mode={})", vadMode);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AEC Ring Buffer (accumulate 160-sample blocks → 512-sample AEC frames)
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct AecRingBuf {
+    float buf[512];
+    int writePos = 0;
+
+    void reset() { writePos = 0; memset(buf, 0, sizeof(buf)); }
+
+    void push(const float* data, int count) {
+        for (int i = 0; i < count && writePos < 512; i++) {
+            buf[writePos++] = data[i];
+        }
+    }
+
+    bool ready() const { return writePos >= 512; }
+
+    void consume() { writePos = 0; }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Start / Stop
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -352,7 +458,12 @@ void AudioEngine::start()
         createNsHandles(_nsHandleL, _nsHandleR, _params.nsMode);
     }
 
-    xTaskCreatePinnedToCore(audioTask, "audio_eng", 16384, this, 10, &_taskHandle, 1);
+    // Create AGC handles if AGC is enabled
+    if (_params.agcEnabled) {
+        createAgcHandles(_agcHandleL, _agcHandleR, _params.agcMode);
+    }
+
+    xTaskCreatePinnedToCore(audioTask, "audio_eng", 32768, this, 10, &_taskHandle, 1);
 }
 
 void AudioEngine::stop()
@@ -373,6 +484,9 @@ void AudioEngine::stop()
     // Destroy NS handles
     destroyNsHandles(_nsHandleL, _nsHandleR);
 
+    // Destroy AGC handles
+    destroyAgcHandles(_agcHandleL, _agcHandleR);
+
     // Destroy NLMS filters
     if (_nlmsL) {
         static_cast<NlmsFilter*>(_nlmsL)->destroy();
@@ -384,6 +498,12 @@ void AudioEngine::stop()
         delete static_cast<NlmsFilter*>(_nlmsR);
         _nlmsR = nullptr;
     }
+
+    // Destroy AEC handles
+    destroyAecHandles(_aecHandleL, _aecHandleR);
+
+    // Destroy VAD handle
+    destroyVadHandle(_vadHandleRef);
 
     // Mute codec output
     bsp_codec_config_t* codec = bsp_get_codec_handle();
@@ -484,6 +604,41 @@ void AudioEngine::setNsMode(int mode)
     _paramsChanged = true;
 }
 
+void AudioEngine::setAgcEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.agcEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setAgcMode(int mode)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.agcMode = std::clamp(mode, 0, 3);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setAgcCompressionGain(int gainDb)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.agcCompressionGainDb = std::clamp(gainDb, 0, 90);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setAgcLimiterEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.agcLimiterEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setAgcTargetLevel(int levelDbfs)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.agcTargetLevelDbfs = std::clamp(levelDbfs, -31, 0);
+    _paramsChanged = true;
+}
+
 void AudioEngine::setVeEnabled(bool enabled)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -540,10 +695,45 @@ void AudioEngine::setVeRefLpf(float freq)
     _paramsChanged = true;
 }
 
+void AudioEngine::setVeMode(int mode)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veMode = std::clamp(mode, 0, 1);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeAecMode(int mode)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veAecMode = mode;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeAecFilterLen(int len)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veAecFilterLen = std::clamp(len, 1, 6);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeVadEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veVadEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeVadMode(int mode)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veVadMode = std::clamp(mode, 0, 4);
+    _paramsChanged = true;
+}
+
 void AudioEngine::setOutputGain(float gain)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    _params.outputGain = std::clamp(gain, 0.0f, 2.0f);
+    _params.outputGain = std::clamp(gain, 0.0f, 4.0f);
     _paramsChanged = true;
 }
 
@@ -586,7 +776,7 @@ void AudioEngine::processLoop()
 
     // Configure codec for 48kHz stereo output
     codec->i2s_reconfig_clk_fn(SAMPLE_RATE, 16, I2S_SLOT_MODE_STEREO);
-    codec->set_volume(80);
+    codec->set_volume(100);
     codec->set_mute(true);  // Start muted
 
     // Allocate I/O buffers
@@ -633,6 +823,54 @@ void AudioEngine::processLoop()
     float* veEstUp48kL = new float[BLOCK_SIZE];     // Upsampled estimates
     float* veEstUp48kR = new float[BLOCK_SIZE];
 
+    // AEC ring buffers (accumulate 160→512 sample frames for AEC processing)
+    AecRingBuf aecRingL, aecRingR, aecRingHP;
+    AecRingBuf aecOutRingL, aecOutRingR;  // Output ring buffers
+    aecRingL.reset(); aecRingR.reset(); aecRingHP.reset();
+    aecOutRingL.reset(); aecOutRingR.reset();
+
+    // AEC 16kHz I/O buffers (512 samples, aligned for ESP-SR)
+    int16_t* aec16kInL  = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_FRAME_16K * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int16_t* aec16kInR  = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_FRAME_16K * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int16_t* aec16kRef  = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_FRAME_16K * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int16_t* aec16kOutL = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_FRAME_16K * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    int16_t* aec16kOutR = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_FRAME_16K * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+
+    // VAD buffer (uses the AEC frame size for analysis)
+    int16_t* vad16kBuf = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_FRAME_16K * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+
+    // AEC output float buffers for upsampling
+    float* aecFloat16kL = new float[AEC_FRAME_16K];
+    float* aecFloat16kR = new float[AEC_FRAME_16K];
+
+    // AEC Resamplers (separate from VE NLMS resamplers)
+    Resampler aecResDownL, aecResDownR, aecResDownHP;
+    Resampler aecResUpL, aecResUpR;
+    aecResDownL.init(true);
+    aecResDownR.init(true);
+    aecResDownHP.init(true);
+    aecResUpL.init(false);
+    aecResUpR.init(false);
+
+    // AEC 16kHz downsampled buffers per block (160 samples from 480 @ 48kHz)
+    float* aecDown16kBlockL  = new float[NS_FRAME_16K];
+    float* aecDown16kBlockR  = new float[NS_FRAME_16K];
+    float* aecDown16kBlockHP = new float[NS_FRAME_16K];
+
+    // AGC Resamplers (separate state from NS/VE resamplers)
+    Resampler agcResDownL, agcResDownR;
+    Resampler agcResUpL, agcResUpR;
+    agcResDownL.init(true);
+    agcResDownR.init(true);
+    agcResUpL.init(false);
+    agcResUpR.init(false);
+
+    // AGC 16kHz processing buffers
+    float* agcDown16kL = new float[NS_FRAME_16K];   // 160 samples
+    float* agcDown16kR = new float[NS_FRAME_16K];
+    int16_t* agc16kIn  = new int16_t[NS_FRAME_16K];
+    int16_t* agc16kOut = new int16_t[NS_FRAME_16K];
+
     mclog::tagInfo(TAG, "buffers allocated: in={}B out={}B", inBufBytes, outBufBytes);
 
     // Local copy of params to minimize lock time
@@ -642,9 +880,20 @@ void AudioEngine::processLoop()
     int prevNsMode = -1;
     bool prevVeEnabled = false;
     int prevVeFilterLength = -1;
+    bool prevAgcEnabled = false;
+    int prevAgcMode = -1;
+    int prevAgcCompressionGainDb = -1;
+    bool prevAgcLimiterEnabled = true;
+    int prevAgcTargetLevelDbfs = -99;
+    bool prevVeAecActive = false;  // Track AEC mode activation
+    int prevVeAecMode = -1;
+    int prevVeAecFilterLen = -1;
+    bool prevVeVadEnabled = false;
+    int prevVeVadMode = -1;
     bool hpDetected = false;
     int hpDetectCounter = 0;
     static constexpr int HP_DETECT_INTERVAL = 48;  // check every ~48 blocks (~480ms)
+    bool aecOutputReady = false;  // True once AEC has produced its first output frame
 
     while (true) {
         // Check if we should stop
@@ -720,6 +969,76 @@ void AudioEngine::processLoop()
                 }
                 prevVeEnabled = localParams.veEnabled;
                 prevVeFilterLength = localParams.veFilterLength;
+            }
+
+            // Handle AEC enable/mode changes (when VE enabled in AEC mode)
+            {
+                bool aecWanted = localParams.veEnabled && localParams.veMode == 1;
+                if (aecWanted != prevVeAecActive ||
+                    localParams.veAecMode != prevVeAecMode ||
+                    localParams.veAecFilterLen != prevVeAecFilterLen) {
+                    if (aecWanted) {
+                        destroyAecHandles(_aecHandleL, _aecHandleR);
+                        createAecHandles(_aecHandleL, _aecHandleR, localParams.veAecMode, localParams.veAecFilterLen);
+                        // Reset ring buffers when recreating AEC
+                        aecRingL.reset(); aecRingR.reset(); aecRingHP.reset();
+                        aecOutRingL.reset(); aecOutRingR.reset();
+                        aecOutputReady = false;
+                    } else {
+                        destroyAecHandles(_aecHandleL, _aecHandleR);
+                    }
+                    prevVeAecActive = aecWanted;
+                    prevVeAecMode = localParams.veAecMode;
+                    prevVeAecFilterLen = localParams.veAecFilterLen;
+                }
+            }
+
+            // Handle VAD enable/mode changes
+            {
+                bool vadWanted = localParams.veEnabled && localParams.veMode == 1 && localParams.veVadEnabled;
+                if (vadWanted != prevVeVadEnabled || localParams.veVadMode != prevVeVadMode) {
+                    if (vadWanted) {
+                        destroyVadHandle(_vadHandleRef);
+                        createVadHandle(_vadHandleRef, localParams.veVadMode);
+                    } else {
+                        destroyVadHandle(_vadHandleRef);
+                    }
+                    prevVeVadEnabled = vadWanted;
+                    prevVeVadMode = localParams.veVadMode;
+                }
+            }
+
+            // Handle AGC enable/config changes
+            if (localParams.agcEnabled != prevAgcEnabled ||
+                localParams.agcMode != prevAgcMode ||
+                localParams.agcCompressionGainDb != prevAgcCompressionGainDb ||
+                localParams.agcLimiterEnabled != prevAgcLimiterEnabled ||
+                localParams.agcTargetLevelDbfs != prevAgcTargetLevelDbfs) {
+                if (localParams.agcEnabled) {
+                    // Recreate AGC handles with new config
+                    destroyAgcHandles(_agcHandleL, _agcHandleR);
+                    createAgcHandles(_agcHandleL, _agcHandleR, localParams.agcMode);
+                    // Configure AGC parameters on each handle
+                    if (_agcHandleL) {
+                        set_agc_config(_agcHandleL,
+                            localParams.agcCompressionGainDb,
+                            localParams.agcLimiterEnabled ? 1 : 0,
+                            localParams.agcTargetLevelDbfs);
+                    }
+                    if (_agcHandleR) {
+                        set_agc_config(_agcHandleR,
+                            localParams.agcCompressionGainDb,
+                            localParams.agcLimiterEnabled ? 1 : 0,
+                            localParams.agcTargetLevelDbfs);
+                    }
+                } else {
+                    destroyAgcHandles(_agcHandleL, _agcHandleR);
+                }
+                prevAgcEnabled = localParams.agcEnabled;
+                prevAgcMode = localParams.agcMode;
+                prevAgcCompressionGainDb = localParams.agcCompressionGainDb;
+                prevAgcLimiterEnabled = localParams.agcLimiterEnabled;
+                prevAgcTargetLevelDbfs = localParams.agcTargetLevelDbfs;
             }
 
             // Recalculate all biquad coefficients
@@ -809,50 +1128,143 @@ void AudioEngine::processLoop()
             _levels.peakHP = std::max(pkHP, _levels.peakHP * PEAK_DECAY);
         }
 
-        // ── 7. Voice Exclusion (NLMS @ 16kHz, uses conditioned HP mic as reference) ──
+        // ── 7. Voice Exclusion (NLMS or AEC @ 16kHz, uses conditioned HP mic as ref) ──
         // Poll headphone detect periodically (not every sample)
         if (++hpDetectCounter >= HP_DETECT_INTERVAL) {
             hpDetectCounter = 0;
             hpDetected = bsp_headphone_detect();
         }
 
-        if (localParams.veEnabled && hpDetected && _nlmsL && _nlmsR && samplesRead == BLOCK_SIZE) {
-            auto* nlL = static_cast<NlmsFilter*>(_nlmsL);
-            auto* nlR = static_cast<NlmsFilter*>(_nlmsR);
+        if (localParams.veEnabled && hpDetected && samplesRead == BLOCK_SIZE) {
             float blend = localParams.veBlend;
-            float step = localParams.veStepSize;
             float maxAtt = localParams.veMaxAttenuation;
 
-            // Downsample 48kHz → 16kHz (480 → 160 samples)
-            veResDownL.downsample3(floatL, veDown16kL, NS_FRAME_16K);
-            veResDownR.downsample3(floatR, veDown16kR, NS_FRAME_16K);
-            veResDownHP.downsample3(floatHP, veDown16kHP, NS_FRAME_16K);
+            if (localParams.veMode == 0 && _nlmsL && _nlmsR) {
+                // ── NLMS mode (existing, unchanged) ──
+                float step = localParams.veStepSize;
 
-            // Run NLMS at 16kHz — returns voice estimate per sample
-            for (int i = 0; i < NS_FRAME_16K; i++) {
-                veEst16kL[i] = nlL->process(veDown16kHP[i], veDown16kL[i], step);
-                veEst16kR[i] = nlR->process(veDown16kHP[i], veDown16kR[i], step);
-            }
+                veResDownL.downsample3(floatL, veDown16kL, NS_FRAME_16K);
+                veResDownR.downsample3(floatR, veDown16kR, NS_FRAME_16K);
+                veResDownHP.downsample3(floatHP, veDown16kHP, NS_FRAME_16K);
 
-            // Upsample voice estimates back to 48kHz
-            veResUpL.upsample3(veEst16kL, veEstUp48kL, NS_FRAME_16K);
-            veResUpR.upsample3(veEst16kR, veEstUp48kR, NS_FRAME_16K);
+                auto* nlL = static_cast<NlmsFilter*>(_nlmsL);
+                auto* nlR = static_cast<NlmsFilter*>(_nlmsR);
 
-            // Subtract voice estimate from full-bandwidth signal
-            for (int i = 0; i < samplesRead; i++) {
-                // Clamp removal by max attenuation (safety limit)
-                float maxRemL = fabsf(floatL[i]) * maxAtt;
-                float maxRemR = fabsf(floatR[i]) * maxAtt;
-                float remL = std::clamp(veEstUp48kL[i], -maxRemL, maxRemL);
-                float remR = std::clamp(veEstUp48kR[i], -maxRemR, maxRemR);
+                for (int i = 0; i < NS_FRAME_16K; i++) {
+                    veEst16kL[i] = nlL->process(veDown16kHP[i], veDown16kL[i], step);
+                    veEst16kR[i] = nlR->process(veDown16kHP[i], veDown16kR[i], step);
+                }
 
-                // Apply with blend: 0 = no removal, 1 = full removal
-                floatL[i] -= blend * remL;
-                floatR[i] -= blend * remR;
+                veResUpL.upsample3(veEst16kL, veEstUp48kL, NS_FRAME_16K);
+                veResUpR.upsample3(veEst16kR, veEstUp48kR, NS_FRAME_16K);
 
-                // NaN protection
-                if (std::isnan(floatL[i])) floatL[i] = 0.0f;
-                if (std::isnan(floatR[i])) floatR[i] = 0.0f;
+                for (int i = 0; i < samplesRead; i++) {
+                    float maxRemL = fabsf(floatL[i]) * maxAtt;
+                    float maxRemR = fabsf(floatR[i]) * maxAtt;
+                    float remL = std::clamp(veEstUp48kL[i], -maxRemL, maxRemL);
+                    float remR = std::clamp(veEstUp48kR[i], -maxRemR, maxRemR);
+                    floatL[i] -= blend * remL;
+                    floatR[i] -= blend * remR;
+                    if (std::isnan(floatL[i])) floatL[i] = 0.0f;
+                    if (std::isnan(floatR[i])) floatR[i] = 0.0f;
+                }
+
+            } else if (localParams.veMode == 1 && _aecHandleL && _aecHandleR) {
+                // ── AEC mode (ring buffer → 512-sample frames) ──
+                constexpr float i16scale = 1.0f / 32768.0f;
+
+                // Downsample this block to 16kHz (480→160)
+                aecResDownL.downsample3(floatL, aecDown16kBlockL, NS_FRAME_16K);
+                aecResDownR.downsample3(floatR, aecDown16kBlockR, NS_FRAME_16K);
+                aecResDownHP.downsample3(floatHP, aecDown16kBlockHP, NS_FRAME_16K);
+
+                // Push 160 samples into ring buffers
+                aecRingL.push(aecDown16kBlockL, NS_FRAME_16K);
+                aecRingR.push(aecDown16kBlockR, NS_FRAME_16K);
+                aecRingHP.push(aecDown16kBlockHP, NS_FRAME_16K);
+
+                // When we have 512 samples, process one AEC frame
+                if (aecRingL.ready() && aecRingR.ready() && aecRingHP.ready()) {
+                    // Convert float→int16 for AEC
+                    for (int i = 0; i < AEC_FRAME_16K; i++) {
+                        float sL = std::clamp(aecRingL.buf[i], -1.0f, 1.0f);
+                        float sR = std::clamp(aecRingR.buf[i], -1.0f, 1.0f);
+                        float sHP = std::clamp(aecRingHP.buf[i], -1.0f, 1.0f);
+                        aec16kInL[i] = static_cast<int16_t>(sL * 32767.0f);
+                        aec16kInR[i] = static_cast<int16_t>(sR * 32767.0f);
+                        aec16kRef[i] = static_cast<int16_t>(sHP * 32767.0f);
+                    }
+
+                    // Run VAD on reference signal if enabled
+                    if (_vadHandleRef) {
+                        // VAD processes 30ms frames (480 samples @ 16kHz)
+                        // We'll check the first 480 samples of our 512-sample buffer
+                        vad_state_t vadState = vad_process(
+                            static_cast<vad_handle_t>(_vadHandleRef),
+                            aec16kRef, 16000, 30);
+                        std::lock_guard<std::mutex> lock(_mutex);
+                        _levels.vadSpeechDetected = (vadState == VAD_SPEECH);
+                    }
+
+                    // Process AEC: input signal + reference → cleaned output
+                    aec_process(static_cast<aec_handle_t*>(_aecHandleL),
+                                aec16kInL, aec16kRef, aec16kOutL);
+                    aec_process(static_cast<aec_handle_t*>(_aecHandleR),
+                                aec16kInR, aec16kRef, aec16kOutR);
+
+                    // Convert AEC output to float and store in output ring buffers
+                    for (int i = 0; i < AEC_FRAME_16K; i++) {
+                        aecOutRingL.buf[i] = static_cast<float>(aec16kOutL[i]) * i16scale;
+                        aecOutRingR.buf[i] = static_cast<float>(aec16kOutR[i]) * i16scale;
+                    }
+                    aecOutRingL.writePos = AEC_FRAME_16K;
+                    aecOutRingR.writePos = AEC_FRAME_16K;
+
+                    // Consume input ring buffers
+                    aecRingL.consume();
+                    aecRingR.consume();
+                    aecRingHP.consume();
+                    aecOutputReady = true;
+                }
+
+                // Apply AEC output: blend with original signal
+                // During startup transient (no output yet), pass through unchanged
+                if (aecOutputReady && aecOutRingL.writePos > 0) {
+                    // Upsample the AEC output back to 48kHz
+                    // We process NS_FRAME_16K (160) samples from AEC output per block
+                    int consumeCount = std::min(NS_FRAME_16K, aecOutRingL.writePos);
+
+                    // Use temporary buffers for upsample input
+                    float aecChunkL[NS_FRAME_16K];
+                    float aecChunkR[NS_FRAME_16K];
+                    memcpy(aecChunkL, aecOutRingL.buf, consumeCount * sizeof(float));
+                    memcpy(aecChunkR, aecOutRingR.buf, consumeCount * sizeof(float));
+
+                    // Shift remaining data in output ring
+                    int remaining = aecOutRingL.writePos - consumeCount;
+                    if (remaining > 0) {
+                        memmove(aecOutRingL.buf, aecOutRingL.buf + consumeCount, remaining * sizeof(float));
+                        memmove(aecOutRingR.buf, aecOutRingR.buf + consumeCount, remaining * sizeof(float));
+                    }
+                    aecOutRingL.writePos = remaining;
+                    aecOutRingR.writePos = remaining;
+
+                    // Upsample to 48kHz
+                    aecResUpL.upsample3(aecChunkL, veEstUp48kL, consumeCount);
+                    aecResUpR.upsample3(aecChunkR, veEstUp48kR, consumeCount);
+
+                    // Replace signal with blended AEC output
+                    int outCount = consumeCount * 3;
+                    for (int i = 0; i < samplesRead && i < outCount; i++) {
+                        float aecL = std::clamp(veEstUp48kL[i], -1.0f, 1.0f);
+                        float aecR = std::clamp(veEstUp48kR[i], -1.0f, 1.0f);
+                        // Blend: 0 = original, 1 = full AEC output
+                        floatL[i] = (1.0f - blend) * floatL[i] + blend * aecL;
+                        floatR[i] = (1.0f - blend) * floatR[i] + blend * aecR;
+                        if (std::isnan(floatL[i])) floatL[i] = 0.0f;
+                        if (std::isnan(floatR[i])) floatR[i] = 0.0f;
+                    }
+                }
             }
         }
 
@@ -885,6 +1297,37 @@ void AudioEngine::processLoop()
             // Upsample 16kHz → 48kHz (160 → 480 samples)
             resamplerUpL.upsample3(down16kL, floatL, NS_FRAME_16K);
             resamplerUpR.upsample3(down16kR, floatR, NS_FRAME_16K);
+        }
+
+        // ── 8b. AGC (downsample → AGC → upsample, after NS, before gain) ──
+        if (localParams.agcEnabled && _agcHandleL && _agcHandleR && samplesRead == BLOCK_SIZE) {
+            // Downsample 48kHz → 16kHz (480 → 160 samples)
+            agcResDownL.downsample3(floatL, agcDown16kL, NS_FRAME_16K);
+            agcResDownR.downsample3(floatR, agcDown16kR, NS_FRAME_16K);
+
+            // Process Left channel: float → int16 → AGC → int16 → float
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                float s = std::clamp(agcDown16kL[i], -1.0f, 1.0f);
+                agc16kIn[i] = static_cast<int16_t>(s * 32767.0f);
+            }
+            esp_agc_process(_agcHandleL, agc16kIn, agc16kOut, NS_FRAME_16K, 16000);
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                agcDown16kL[i] = static_cast<float>(agc16kOut[i]) * scale;
+            }
+
+            // Process Right channel
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                float s = std::clamp(agcDown16kR[i], -1.0f, 1.0f);
+                agc16kIn[i] = static_cast<int16_t>(s * 32767.0f);
+            }
+            esp_agc_process(_agcHandleR, agc16kIn, agc16kOut, NS_FRAME_16K, 16000);
+            for (int i = 0; i < NS_FRAME_16K; i++) {
+                agcDown16kR[i] = static_cast<float>(agc16kOut[i]) * scale;
+            }
+
+            // Upsample 16kHz → 48kHz (160 → 480 samples)
+            agcResUpL.upsample3(agcDown16kL, floatL, NS_FRAME_16K);
+            agcResUpR.upsample3(agcDown16kR, floatR, NS_FRAME_16K);
         }
 
         // ── 9. Apply output gain ──
@@ -952,6 +1395,23 @@ void AudioEngine::processLoop()
     delete[] veEst16kR;
     delete[] veEstUp48kL;
     delete[] veEstUp48kR;
+    delete[] agcDown16kL;
+    delete[] agcDown16kR;
+    delete[] agc16kIn;
+    delete[] agc16kOut;
+
+    // AEC buffers (heap_caps allocated)
+    heap_caps_free(aec16kInL);
+    heap_caps_free(aec16kInR);
+    heap_caps_free(aec16kRef);
+    heap_caps_free(aec16kOutL);
+    heap_caps_free(aec16kOutR);
+    heap_caps_free(vad16kBuf);
+    delete[] aecFloat16kL;
+    delete[] aecFloat16kR;
+    delete[] aecDown16kBlockL;
+    delete[] aecDown16kBlockR;
+    delete[] aecDown16kBlockHP;
 
     mclog::tagInfo(TAG, "audio task exiting");
 }

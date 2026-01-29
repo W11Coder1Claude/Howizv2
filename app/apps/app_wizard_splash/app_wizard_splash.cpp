@@ -92,14 +92,13 @@ void AppWizardSplash::create_starfield()
         s.speed   = 1 + (fast_rand() % 4);       // Twinkle speed
         s.phase   = fast_rand() % 360;            // Phase offset
 
-        // Create a small circle for each star
+        // Create a small square for each star (no radius = less memory)
         s.obj = lv_obj_create(_bg);
         lv_obj_remove_style_all(s.obj);
 
         // Star size: mostly small, a few larger
-        int size = (fast_rand() % 10 < 7) ? 3 : (fast_rand() % 3 == 0 ? 7 : 5);
+        int size = (fast_rand() % 10 < 7) ? 2 : 4;
         lv_obj_set_size(s.obj, size, size);
-        lv_obj_set_style_radius(s.obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
 
         // Star color varies
         uint32_t color;
@@ -162,22 +161,7 @@ void AppWizardSplash::create_title()
     lv_obj_set_style_bg_opa(line_bot, 100, LV_PART_MAIN);
     lv_obj_align(line_bot, LV_ALIGN_CENTER, 0, 65);
 
-    // Small diamond decorations on the lines
-    lv_obj_t* diamond_top = lv_obj_create(_bg);
-    lv_obj_remove_style_all(diamond_top);
-    lv_obj_set_size(diamond_top, 10, 10);
-    lv_obj_set_style_bg_color(diamond_top, lv_color_hex(COLOR_TITLE_GLOW), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(diamond_top, 200, LV_PART_MAIN);
-    lv_obj_set_style_transform_rotation(diamond_top, 450, LV_PART_MAIN);
-    lv_obj_align(diamond_top, LV_ALIGN_CENTER, 0, -80);
-
-    lv_obj_t* diamond_bot = lv_obj_create(_bg);
-    lv_obj_remove_style_all(diamond_bot);
-    lv_obj_set_size(diamond_bot, 8, 8);
-    lv_obj_set_style_bg_color(diamond_bot, lv_color_hex(COLOR_TITLE_GLOW), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(diamond_bot, 180, LV_PART_MAIN);
-    lv_obj_set_style_transform_rotation(diamond_bot, 450, LV_PART_MAIN);
-    lv_obj_align(diamond_bot, LV_ALIGN_CENTER, 0, 65);
+    // Diamond decorations removed to save memory (rotation requires extra render buffer)
 }
 
 void AppWizardSplash::update_starfield()

@@ -11,19 +11,21 @@
  * @brief Wizard-themed audio control UI
  *
  * Layout (1280x720):
- * ┌─────────────────────────────────────────────────────────────────┐
- * │  ◆ HOWIZARD AUDIO ENCHANTMENT ◆                  [MUTE]  v0.1 │
- * ├────────┬────────────────────────────────────────────────────────┤
- * │ FILTER │  Swipeable content panels:                            │
- * │ ══════ │  Panel 1: FILTERS - HPF/LPF controls                 │
- * │ EQ     │  Panel 2: EQUALIZER - 3-band parametric              │
- * │ ══════ │  Panel 3: OUTPUT - Volume, Gain, VU meters            │
- * │ OUTPUT │  Panel 4: VOICE - Voice Exclusion (NLMS)              │
- * │ ══════ │                                                       │
- * │ VOICE  │                                                       │
- * ├────────┴────────────────────────────────────────────────────────┤
- * │  ◇ HP: --- ◇  ◇ 48kHz ◇  ◇ Block: 480 ◇                     │
- * └─────────────────────────────────────────────────────────────────┘
+ * +-------------------------------------------------------------+
+ * |  HOWIZARD AUDIO ENCHANTMENT                    [MUTE]  v0.2 |
+ * +--------+----------------------------------------------------+
+ * | FILTER |  Swipeable content panels:                          |
+ * | ------ |  Panel 1: FILTERS - HPF/LPF/NS controls            |
+ * | EQ     |  Panel 2: EQUALIZER - 3-band parametric             |
+ * | ------ |  Panel 3: OUTPUT - Volume, Gain, VU meters          |
+ * | OUTPUT |  Panel 4: VOICE - VE (NLMS + AEC modes)             |
+ * | ------ |  Panel 5: PROFILES - Save/Load SD card              |
+ * | VOICE  |                                                     |
+ * | ------ |                                                     |
+ * | PROF   |                                                     |
+ * +--------+----------------------------------------------------+
+ * |  HP: --- | 48kHz | Block: 480                                |
+ * +-------------------------------------------------------------+
  */
 class WizardUI {
 public:
@@ -56,6 +58,8 @@ private:
     static constexpr int CONTENT_W   = SCREEN_W - NAV_W;
     static constexpr int CONTENT_H   = SCREEN_H - HEADER_H - FOOTER_H;
 
+    static constexpr int NUM_PANELS  = 5;
+
     // Root container
     lv_obj_t* _root = nullptr;
 
@@ -72,6 +76,7 @@ private:
     lv_obj_t* _navBtnEq = nullptr;
     lv_obj_t* _navBtnOutput = nullptr;
     lv_obj_t* _navBtnVoice = nullptr;
+    lv_obj_t* _navBtnProfiles = nullptr;
     int _activePanel = 0;
 
     // Content panels
@@ -80,6 +85,7 @@ private:
     lv_obj_t* _panelEq = nullptr;
     lv_obj_t* _panelOutput = nullptr;
     lv_obj_t* _panelVoice = nullptr;
+    lv_obj_t* _panelProfiles = nullptr;
 
     // Filter panel controls
     lv_obj_t* _hpfToggle = nullptr;
@@ -112,6 +118,21 @@ private:
     lv_obj_t* _gainValueLabel = nullptr;
     lv_obj_t* _micGainSlider = nullptr;
     lv_obj_t* _micGainValueLabel = nullptr;
+
+    // AGC controls (on output panel)
+    lv_obj_t* _agcToggle = nullptr;
+    lv_obj_t* _agcModeBtn0 = nullptr;
+    lv_obj_t* _agcModeBtn1 = nullptr;
+    lv_obj_t* _agcModeBtn2 = nullptr;
+    lv_obj_t* _agcModeBtn3 = nullptr;
+    int _agcActiveMode = 2;
+    lv_obj_t* _agcGainSlider = nullptr;
+    lv_obj_t* _agcGainValueLabel = nullptr;
+    lv_obj_t* _agcTargetSlider = nullptr;
+    lv_obj_t* _agcTargetValueLabel = nullptr;
+    lv_obj_t* _agcLimiterToggle = nullptr;
+
+    // VU meters
     lv_obj_t* _meterBarL = nullptr;
     lv_obj_t* _meterBarR = nullptr;
     lv_obj_t* _meterPeakL = nullptr;
@@ -120,7 +141,13 @@ private:
     // Voice Exclusion panel controls
     lv_obj_t* _veToggle = nullptr;
     lv_obj_t* _veHpStatusLabel = nullptr;
-    // Reference signal controls
+    // Mode selector (NLMS / AEC)
+    lv_obj_t* _veModeNlmsBtn = nullptr;
+    lv_obj_t* _veModeAecBtn = nullptr;
+    // Sections (containers that show/hide based on mode)
+    lv_obj_t* _nlmsSection = nullptr;
+    lv_obj_t* _aecSection = nullptr;
+    // Reference signal controls (shared between modes)
     lv_obj_t* _veRefGainSlider = nullptr;
     lv_obj_t* _veRefGainValueLabel = nullptr;
     lv_obj_t* _veRefHpfSlider = nullptr;
@@ -129,9 +156,9 @@ private:
     lv_obj_t* _veRefLpfValueLabel = nullptr;
     lv_obj_t* _veHpMeterBar = nullptr;
     lv_obj_t* _veHpMeterPeak = nullptr;
-    // Cancellation controls
     lv_obj_t* _veBlendSlider = nullptr;
     lv_obj_t* _veBlendValueLabel = nullptr;
+    // NLMS-specific controls
     lv_obj_t* _veStepSlider = nullptr;
     lv_obj_t* _veStepValueLabel = nullptr;
     lv_obj_t* _veFilterBtn32 = nullptr;
@@ -140,6 +167,29 @@ private:
     int _veActiveFilterLen = 128;
     lv_obj_t* _veAttenSlider = nullptr;
     lv_obj_t* _veAttenValueLabel = nullptr;
+    // AEC-specific controls
+    lv_obj_t* _veAecModeBtn0 = nullptr;
+    lv_obj_t* _veAecModeBtn1 = nullptr;
+    lv_obj_t* _veAecModeBtn2 = nullptr;
+    lv_obj_t* _veAecModeBtn3 = nullptr;
+    int _veAecActiveMode = 1;
+    lv_obj_t* _veAecFilterLenSlider = nullptr;
+    lv_obj_t* _veAecFilterLenValueLabel = nullptr;
+    // VAD controls (AEC mode)
+    lv_obj_t* _veVadToggle = nullptr;
+    lv_obj_t* _veVadModeSlider = nullptr;
+    lv_obj_t* _veVadModeValueLabel = nullptr;
+    lv_obj_t* _veVadStatusLabel = nullptr;
+
+    // Profiles panel controls
+    lv_obj_t* _profileRoller = nullptr;
+    lv_obj_t* _profileNameInput = nullptr;
+    lv_obj_t* _profileSaveBtn = nullptr;
+    lv_obj_t* _profileLoadBtn = nullptr;
+    lv_obj_t* _profileDeleteBtn = nullptr;
+    lv_obj_t* _profileSetDefaultBtn = nullptr;
+    lv_obj_t* _profileStatusLabel = nullptr;
+    lv_obj_t* _profileDefaultLabel = nullptr;
 
     // Footer
     lv_obj_t* _footerBar = nullptr;
@@ -153,11 +203,15 @@ private:
     void createEqPanel();
     void createOutputPanel();
     void createVoicePanel();
+    void createProfilesPanel();
     void createFooter();
     void showPanel(int index);
     void updateNavHighlight();
     void updateMuteButton();
     void updateMeters();
+    void syncUiToParams();  // Update all UI controls to match engine params
+    void refreshProfileList();
+    void updateVoiceModeVisibility();
 
     // Style helpers
     void styleSliderWizard(lv_obj_t* slider);
@@ -179,7 +233,13 @@ private:
     static void onMicGainSliderChanged(lv_event_t* e);
     static void onNsToggle(lv_event_t* e);
     static void onNsModeClicked(lv_event_t* e);
+    static void onAgcToggle(lv_event_t* e);
+    static void onAgcModeClicked(lv_event_t* e);
+    static void onAgcGainChanged(lv_event_t* e);
+    static void onAgcTargetChanged(lv_event_t* e);
+    static void onAgcLimiterToggle(lv_event_t* e);
     static void onVeToggle(lv_event_t* e);
+    static void onVeModeClicked(lv_event_t* e);
     static void onVeRefGainChanged(lv_event_t* e);
     static void onVeRefHpfChanged(lv_event_t* e);
     static void onVeRefLpfChanged(lv_event_t* e);
@@ -187,4 +247,12 @@ private:
     static void onVeStepChanged(lv_event_t* e);
     static void onVeFilterLenClicked(lv_event_t* e);
     static void onVeAttenChanged(lv_event_t* e);
+    static void onVeAecModeClicked(lv_event_t* e);
+    static void onVeAecFilterLenChanged(lv_event_t* e);
+    static void onVeVadToggle(lv_event_t* e);
+    static void onVeVadModeChanged(lv_event_t* e);
+    static void onProfileSave(lv_event_t* e);
+    static void onProfileLoad(lv_event_t* e);
+    static void onProfileDelete(lv_event_t* e);
+    static void onProfileSetDefault(lv_event_t* e);
 };
