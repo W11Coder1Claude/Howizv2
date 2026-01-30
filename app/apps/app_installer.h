@@ -7,7 +7,6 @@
 #include <mooncake.h>
 #include <memory>
 #include <hal/hal.h>
-#include "app_wizard_splash/app_wizard_splash.h"
 #include "app_audio_control/app_audio_control.h"
 
 /**
@@ -15,11 +14,11 @@
  */
 inline void on_startup_anim()
 {
-    // No separate startup animation - splash screen handles it
+    // Splash screen removed for faster boot and lower memory usage
 }
 
 inline void on_install_apps()
 {
-    mooncake::GetMooncake().installApp(std::make_unique<AppWizardSplash>());
+    // Direct launch to audio control - no splash screen
     mooncake::GetMooncake().installApp(std::make_unique<AppAudioControl>());
 }

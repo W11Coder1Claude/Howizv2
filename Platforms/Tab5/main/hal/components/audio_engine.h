@@ -35,7 +35,7 @@ struct AudioEngineParams {
 
     // Noise Suppression (ESP-SR standalone NS)
     bool  nsEnabled       = false;
-    int   nsMode          = 1;       // 0=Mild, 1=Medium, 2=Aggressive
+    int   nsMode          = 2;       // 0=Mild, 1=Medium, 2=Aggressive (default: aggressive)
 
     // AGC (ESP-SR Automatic Gain Control @ 16kHz)
     bool  agcEnabled           = false;
@@ -46,15 +46,15 @@ struct AudioEngineParams {
 
     // Voice Exclusion (NLMS adaptive filter @ 16kHz, uses headset mic as reference)
     bool  veEnabled        = false;
-    float veBlend          = 0.7f;     // 0.0–1.0: mix of original vs cleaned
-    float veStepSize       = 0.1f;     // 0.01–1.0: NLMS adaptation rate
-    int   veFilterLength   = 128;      // 16–512 taps (at 16kHz: 128 taps = 8ms)
-    float veMaxAttenuation = 0.8f;     // 0.0–1.0: safety limit
+    float veBlend          = 0.5f;     // 0.0–1.0: mix of original vs cleaned (reduced for stability)
+    float veStepSize       = 0.08f;    // 0.01–1.0: NLMS adaptation rate (slower for transient rejection)
+    int   veFilterLength   = 64;       // 16–512 taps (shorter for faster adaptation)
+    float veMaxAttenuation = 0.6f;     // 0.0–1.0: safety limit (reduced for stability)
 
     // Voice Exclusion - Reference signal conditioning (applied to HP mic before NLMS)
-    float veRefGain        = 1.0f;     // 0.1–5.0: reference signal gain multiplier
-    float veRefHpf         = 80.0f;    // 20–500 Hz: reference high-pass filter
-    float veRefLpf         = 4000.0f;  // 1000–8000 Hz: reference low-pass filter
+    float veRefGain        = 0.5f;     // 0.1–5.0: reference signal gain multiplier (reduced)
+    float veRefHpf         = 150.0f;   // 20–500 Hz: reference HPF (raised to reject footsteps)
+    float veRefLpf         = 3000.0f;  // 1000–8000 Hz: reference LPF (tightened for voice)
 
     // Voice Exclusion - AEC mode (alternative to NLMS)
     int   veMode           = 0;        // 0=NLMS, 1=AEC
@@ -63,10 +63,15 @@ struct AudioEngineParams {
     bool  veVadEnabled     = true;     // VAD for double-talk detection (AEC mode)
     int   veVadMode        = 3;        // 0–4: Normal to Very Very Very Aggressive
 
+    // Voice Exclusion - VAD Gating (attenuates output during non-speech)
+    bool  veVadGateEnabled = true;     // Enable VAD-based gating
+    float veVadGateAtten   = 0.15f;    // 0.0–1.0: attenuation during silence (0.15 = -16dB)
+
     // Output
-    float outputGain      = 1.5f;    // Linear (0.0-4.0)
+    float outputGain      = 1.5f;    // Linear (0.0-6.0, extended for boost)
     int   outputVolume    = 100;     // Codec volume (0-100)
     bool  outputMute      = true;    // MUTED by default (safety)
+    bool  boostEnabled    = false;   // Enable soft clipping for high gain levels
 };
 
 struct AudioLevels {
@@ -122,6 +127,9 @@ public:
     void setOutputGain(float gain);
     void setOutputVolume(int vol);
     void setMute(bool mute);
+    void setBoostEnabled(bool enabled);
+    void setVeVadGateEnabled(bool enabled);
+    void setVeVadGateAtten(float atten);
 
 private:
     AudioEngine() = default;

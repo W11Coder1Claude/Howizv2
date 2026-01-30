@@ -118,6 +118,8 @@ private:
     lv_obj_t* _gainValueLabel = nullptr;
     lv_obj_t* _micGainSlider = nullptr;
     lv_obj_t* _micGainValueLabel = nullptr;
+    lv_obj_t* _boostToggle = nullptr;
+    lv_obj_t* _boostWarningLabel = nullptr;
 
     // AGC controls (on output panel)
     lv_obj_t* _agcToggle = nullptr;
@@ -180,6 +182,10 @@ private:
     lv_obj_t* _veVadModeSlider = nullptr;
     lv_obj_t* _veVadModeValueLabel = nullptr;
     lv_obj_t* _veVadStatusLabel = nullptr;
+    // VAD Gating controls
+    lv_obj_t* _veVadGateToggle = nullptr;
+    lv_obj_t* _veVadGateAttenSlider = nullptr;
+    lv_obj_t* _veVadGateAttenValueLabel = nullptr;
 
     // Profiles panel controls
     lv_obj_t* _profileRoller = nullptr;
@@ -251,6 +257,9 @@ private:
     static void onVeAecFilterLenChanged(lv_event_t* e);
     static void onVeVadToggle(lv_event_t* e);
     static void onVeVadModeChanged(lv_event_t* e);
+    static void onBoostToggle(lv_event_t* e);
+    static void onVeVadGateToggle(lv_event_t* e);
+    static void onVeVadGateAttenChanged(lv_event_t* e);
     static void onProfileSave(lv_event_t* e);
     static void onProfileLoad(lv_event_t* e);
     static void onProfileDelete(lv_event_t* e);

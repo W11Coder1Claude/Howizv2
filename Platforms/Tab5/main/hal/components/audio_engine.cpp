@@ -733,7 +733,28 @@ void AudioEngine::setVeVadMode(int mode)
 void AudioEngine::setOutputGain(float gain)
 {
     std::lock_guard<std::mutex> lock(_mutex);
-    _params.outputGain = std::clamp(gain, 0.0f, 4.0f);
+    _params.outputGain = std::clamp(gain, 0.0f, 6.0f);  // Extended range for boost mode
+    _paramsChanged = true;
+}
+
+void AudioEngine::setBoostEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.boostEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeVadGateEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veVadGateEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setVeVadGateAtten(float atten)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.veVadGateAtten = std::clamp(atten, 0.0f, 1.0f);
     _paramsChanged = true;
 }
 
@@ -1268,6 +1289,23 @@ void AudioEngine::processLoop()
             }
         }
 
+        // ── 7b. VAD-based gating (attenuate output during non-speech) ──
+        // This reduces transient sounds (footsteps, etc.) when VAD detects silence
+        if (localParams.veVadGateEnabled && localParams.veEnabled && localParams.veMode == 1) {
+            bool speechDetected = false;
+            {
+                std::lock_guard<std::mutex> lock(_mutex);
+                speechDetected = _levels.vadSpeechDetected;
+            }
+            if (!speechDetected) {
+                float vadMuteFactor = localParams.veVadGateAtten;  // e.g., 0.15 = -16dB
+                for (int i = 0; i < samplesRead; i++) {
+                    floatL[i] *= vadMuteFactor;
+                    floatR[i] *= vadMuteFactor;
+                }
+            }
+        }
+
         // ── 8. Noise Suppression (downsample → NS → upsample) ──
         if (localParams.nsEnabled && _nsHandleL && _nsHandleR && samplesRead == BLOCK_SIZE) {
             // Downsample 48kHz → 16kHz (480 → 160 samples)
@@ -1335,6 +1373,19 @@ void AudioEngine::processLoop()
         for (int i = 0; i < samplesRead; i++) {
             floatL[i] *= gain;
             floatR[i] *= gain;
+        }
+
+        // ── 9b. Soft clipping for boost mode (tanh-based saturation) ──
+        if (localParams.boostEnabled) {
+            // Soft clip: prevents harsh digital clipping at high gains
+            // tanh(x * drive) / tanh(drive) gives smooth saturation
+            constexpr float drive = 1.5f;
+            constexpr float tanhDrive = 0.9051f;  // tanh(1.5)
+            constexpr float invTanhDrive = 1.0f / tanhDrive;
+            for (int i = 0; i < samplesRead; i++) {
+                floatL[i] = tanhf(floatL[i] * drive) * invTanhDrive;
+                floatR[i] = tanhf(floatR[i] * drive) * invTanhDrive;
+            }
         }
 
         // ── 10. Compute RMS + peak for level metering ──

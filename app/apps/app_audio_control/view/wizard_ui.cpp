@@ -168,7 +168,7 @@ void WizardUI::createHeader()
 
     // Version
     _versionLabel = lv_label_create(_headerBar);
-    lv_label_set_text(_versionLabel, "v0.2");
+    lv_label_set_text(_versionLabel, "v0.3");
     lv_obj_set_style_text_font(_versionLabel, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(_versionLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
     lv_obj_align(_versionLabel, LV_ALIGN_RIGHT_MID, -20, 0);
@@ -523,14 +523,35 @@ void WizardUI::createOutputPanel()
     createSectionLabel(_panelOutput, "OUTPUT GAIN", 60, 120);
 
     _gainSlider = lv_slider_create(_panelOutput);
-    lv_obj_set_size(_gainSlider, 600, 28);
+    lv_obj_set_size(_gainSlider, 500, 28);
     lv_obj_set_pos(_gainSlider, 250, 123);
-    lv_slider_set_range(_gainSlider, 0, 400);  // 0.0 to 4.0
+    lv_slider_set_range(_gainSlider, 0, 600);  // 0.0 to 6.0 (extended for boost)
     lv_slider_set_value(_gainSlider, 150, LV_ANIM_OFF);
     styleSliderWizard(_gainSlider);
     lv_obj_add_event_cb(_gainSlider, onGainSliderChanged, LV_EVENT_VALUE_CHANGED, this);
 
-    _gainValueLabel = createValueLabel(_panelOutput, "1.50x", 870, 123);
+    _gainValueLabel = createValueLabel(_panelOutput, "1.50x", 770, 123);
+
+    // Boost toggle
+    _boostToggle = lv_btn_create(_panelOutput);
+    lv_obj_set_size(_boostToggle, 100, 36);
+    lv_obj_set_pos(_boostToggle, 870, 118);
+    styleToggleWizard(_boostToggle);
+    lv_obj_add_event_cb(_boostToggle, onBoostToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* boostLbl = lv_label_create(_boostToggle);
+    lv_label_set_text(boostLbl, "BOOST");
+    lv_obj_set_style_text_font(boostLbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(boostLbl, lv_color_hex(LAVENDER), LV_PART_MAIN);
+    lv_obj_center(boostLbl);
+
+    // Boost warning label (hidden by default)
+    _boostWarningLabel = lv_label_create(_panelOutput);
+    lv_label_set_text(_boostWarningLabel, "Soft limiting active");
+    lv_obj_set_style_text_font(_boostWarningLabel, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_boostWarningLabel, lv_color_hex(METER_YELLOW), LV_PART_MAIN);
+    lv_obj_set_pos(_boostWarningLabel, 980, 123);
+    lv_obj_add_flag(_boostWarningLabel, LV_OBJ_FLAG_HIDDEN);
 
     // ── Mic Gain ──
     createSectionLabel(_panelOutput, "MIC GAIN", 60, 165);
@@ -882,11 +903,48 @@ void WizardUI::createVoicePanel()
     lv_obj_t* defChild = lv_obj_get_child(_veFilterBtn64, 0);
     if (defChild) lv_obj_set_style_text_color(defChild, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
 
+    createDiamondDivider(_panelVoice, 400, 800);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // VAD Gating Controls (attenuate during non-speech)
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelVoice, "VAD GATING (AEC MODE)", 60, 410);
+
+    _veVadGateToggle = lv_btn_create(_panelVoice);
+    lv_obj_set_size(_veVadGateToggle, 100, 36);
+    lv_obj_set_pos(_veVadGateToggle, 60, 445);
+    styleToggleWizard(_veVadGateToggle);
+    lv_obj_set_style_border_color(_veVadGateToggle, lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+    lv_obj_add_event_cb(_veVadGateToggle, onVeVadGateToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* vadGateLbl = lv_label_create(_veVadGateToggle);
+    lv_label_set_text(vadGateLbl, "GATE ON");
+    lv_obj_set_style_text_font(vadGateLbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(vadGateLbl, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+    lv_obj_center(vadGateLbl);
+
+    createValueLabel(_panelVoice, "Silence Atten:", 200, 453);
+    _veVadGateAttenSlider = lv_slider_create(_panelVoice);
+    lv_obj_set_size(_veVadGateAttenSlider, 400, 24);
+    lv_obj_set_pos(_veVadGateAttenSlider, sliderX, 450);
+    lv_slider_set_range(_veVadGateAttenSlider, 0, 50);  // 0-50% (0.0-0.5)
+    lv_slider_set_value(_veVadGateAttenSlider, 15, LV_ANIM_OFF);  // 15% = -16dB
+    styleSliderWizard(_veVadGateAttenSlider);
+    lv_obj_add_event_cb(_veVadGateAttenSlider, onVeVadGateAttenChanged, LV_EVENT_VALUE_CHANGED, this);
+    _veVadGateAttenValueLabel = createValueLabel(_panelVoice, "15% (-16dB)", 720, 450);
+
+    // VAD status indicator
+    _veVadStatusLabel = lv_label_create(_panelVoice);
+    lv_label_set_text(_veVadStatusLabel, "SILENCE");
+    lv_obj_set_style_text_font(_veVadStatusLabel, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_veVadStatusLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
+    lv_obj_set_pos(_veVadStatusLabel, 850, 453);
+
     lv_obj_t* nlmsNote = lv_label_create(_panelVoice);
-    lv_label_set_text(nlmsNote, "NLMS @ 16kHz  |  Condition the ref signal so NLMS can match your voice");
+    lv_label_set_text(nlmsNote, "VAD gate requires AEC mode (engine setting)  |  Reduces transients during silence");
     lv_obj_set_style_text_font(nlmsNote, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(nlmsNote, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
-    lv_obj_set_pos(nlmsNote, 60, 410);
+    lv_obj_set_pos(nlmsNote, 60, 495);
 }
 
 void WizardUI::updateVoiceModeVisibility()
@@ -1109,13 +1167,35 @@ void WizardUI::syncUiToParams()
     }
     if (_gainSlider) {
         lv_slider_set_value(_gainSlider, (int)(params.outputGain * 100.0f), LV_ANIM_OFF);
-        snprintf(buf, sizeof(buf), "%.2fx", (double)params.outputGain);
+        if (params.outputGain > 1.0f) {
+            snprintf(buf, sizeof(buf), "%.2fx (%d%%)", (double)params.outputGain, (int)(params.outputGain * 100.0f));
+        } else {
+            snprintf(buf, sizeof(buf), "%.2fx", (double)params.outputGain);
+        }
         if (_gainValueLabel) lv_label_set_text(_gainValueLabel, buf);
     }
     if (_micGainSlider) {
         lv_slider_set_value(_micGainSlider, (int)params.micGain, LV_ANIM_OFF);
         snprintf(buf, sizeof(buf), "%d", (int)params.micGain);
         if (_micGainValueLabel) lv_label_set_text(_micGainValueLabel, buf);
+    }
+
+    // Boost toggle
+    if (_boostToggle) {
+        lv_obj_t* lbl = lv_obj_get_child(_boostToggle, 0);
+        if (lbl) {
+            lv_obj_set_style_text_color(lbl,
+                lv_color_hex(params.boostEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+        }
+        lv_obj_set_style_border_color(_boostToggle,
+            lv_color_hex(params.boostEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+    }
+    if (_boostWarningLabel) {
+        if (params.boostEnabled) {
+            lv_obj_remove_flag(_boostWarningLabel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(_boostWarningLabel, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     // AGC
@@ -1207,7 +1287,26 @@ void WizardUI::syncUiToParams()
         }
     }
 
-    // (AEC/VAD UI removed to save LVGL memory - engine still supports it)
+    // VAD Gate controls
+    if (_veVadGateToggle) {
+        lv_obj_t* lbl = lv_obj_get_child(_veVadGateToggle, 0);
+        if (lbl) {
+            lv_label_set_text(lbl, params.veVadGateEnabled ? "GATE ON" : "GATE OFF");
+            lv_obj_set_style_text_color(lbl,
+                lv_color_hex(params.veVadGateEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+        }
+        lv_obj_set_style_border_color(_veVadGateToggle,
+            lv_color_hex(params.veVadGateEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+    }
+    if (_veVadGateAttenSlider) {
+        int attenPct = (int)(params.veVadGateAtten * 100.0f);
+        lv_slider_set_value(_veVadGateAttenSlider, attenPct, LV_ANIM_OFF);
+        if (_veVadGateAttenValueLabel) {
+            float db = (attenPct > 0) ? 20.0f * log10f(params.veVadGateAtten) : -40.0f;
+            snprintf(buf, sizeof(buf), "%d%% (%.0fdB)", attenPct, (double)db);
+            lv_label_set_text(_veVadGateAttenValueLabel, buf);
+        }
+    }
 #endif
 }
 
@@ -1563,8 +1662,8 @@ void WizardUI::onGainSliderChanged(lv_event_t* e)
 {
     auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
     auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
-    int val = lv_slider_get_value(slider);  // 0-400
-    float gain = (float)val / 100.0f;       // 0.00-4.00
+    int val = lv_slider_get_value(slider);  // 0-600 (extended)
+    float gain = (float)val / 100.0f;       // 0.00-6.00
 
 #ifdef ESP_PLATFORM
     AudioEngine::getInstance().setOutputGain(gain);
@@ -1572,7 +1671,12 @@ void WizardUI::onGainSliderChanged(lv_event_t* e)
 
     if (ui->_gainValueLabel) {
         char buf[16];
-        snprintf(buf, sizeof(buf), "%.2fx", (double)gain);
+        // Show percentage when above 1.0x for clarity
+        if (gain > 1.0f) {
+            snprintf(buf, sizeof(buf), "%.2fx (%d%%)", (double)gain, (int)(gain * 100.0f));
+        } else {
+            snprintf(buf, sizeof(buf), "%.2fx", (double)gain);
+        }
         lv_label_set_text(ui->_gainValueLabel, buf);
     }
 }
@@ -1927,6 +2031,79 @@ void WizardUI::onVeAecModeClicked(lv_event_t* e) { (void)e; }
 void WizardUI::onVeAecFilterLenChanged(lv_event_t* e) { (void)e; }
 void WizardUI::onVeVadToggle(lv_event_t* e) { (void)e; }
 void WizardUI::onVeVadModeChanged(lv_event_t* e) { (void)e; }
+
+void WizardUI::onBoostToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.boostEnabled;
+    engine.setBoostEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_obj_set_style_text_color(label,
+            lv_color_hex(newEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+
+    // Show/hide warning label
+    if (ui->_boostWarningLabel) {
+        if (newEnabled) {
+            lv_obj_remove_flag(ui->_boostWarningLabel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(ui->_boostWarningLabel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+#else
+    (void)ui;
+#endif
+}
+
+void WizardUI::onVeVadGateToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    (void)ui;
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.veVadGateEnabled;
+    engine.setVeVadGateEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "GATE ON" : "GATE OFF");
+        lv_obj_set_style_text_color(label,
+            lv_color_hex(newEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#endif
+}
+
+void WizardUI::onVeVadGateAttenChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);   // 0-50
+    float atten = (float)val / 100.0f;       // 0.0-0.5
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setVeVadGateAtten(atten);
+#endif
+
+    if (ui->_veVadGateAttenValueLabel) {
+        char buf[16];
+        // Show approximate dB value
+        float db = (val > 0) ? 20.0f * log10f(atten) : -40.0f;
+        snprintf(buf, sizeof(buf), "%d%% (%.0fdB)", val, (double)db);
+        lv_label_set_text(ui->_veVadGateAttenValueLabel, buf);
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Profile callbacks

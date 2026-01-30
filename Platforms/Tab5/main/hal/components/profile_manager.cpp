@@ -91,9 +91,12 @@ bool ProfileManager::serialize(const std::string& path, const AudioEngineParams&
     fprintf(f, "veAecFilterLen=%d\n", params.veAecFilterLen);
     fprintf(f, "veVadEnabled=%d\n", params.veVadEnabled ? 1 : 0);
     fprintf(f, "veVadMode=%d\n", params.veVadMode);
+    fprintf(f, "veVadGateEnabled=%d\n", params.veVadGateEnabled ? 1 : 0);
+    fprintf(f, "veVadGateAtten=%.2f\n", params.veVadGateAtten);
     fprintf(f, "outputGain=%.2f\n", params.outputGain);
     fprintf(f, "outputVolume=%d\n", params.outputVolume);
     fprintf(f, "outputMute=%d\n", params.outputMute ? 1 : 0);
+    fprintf(f, "boostEnabled=%d\n", params.boostEnabled ? 1 : 0);
 
     fclose(f);
     return true;
@@ -155,9 +158,12 @@ bool ProfileManager::deserialize(const std::string& path, AudioEngineParams& par
         else if (strcmp(key, "veAecFilterLen") == 0)   params.veAecFilterLen = atoi(val);
         else if (strcmp(key, "veVadEnabled") == 0)     params.veVadEnabled = atoi(val) != 0;
         else if (strcmp(key, "veVadMode") == 0)        params.veVadMode = atoi(val);
+        else if (strcmp(key, "veVadGateEnabled") == 0) params.veVadGateEnabled = atoi(val) != 0;
+        else if (strcmp(key, "veVadGateAtten") == 0)   params.veVadGateAtten = strtof(val, nullptr);
         else if (strcmp(key, "outputGain") == 0)       params.outputGain = strtof(val, nullptr);
         else if (strcmp(key, "outputVolume") == 0)     params.outputVolume = atoi(val);
         else if (strcmp(key, "outputMute") == 0)       params.outputMute = atoi(val) != 0;
+        else if (strcmp(key, "boostEnabled") == 0)     params.boostEnabled = atoi(val) != 0;
     }
 
     fclose(f);
