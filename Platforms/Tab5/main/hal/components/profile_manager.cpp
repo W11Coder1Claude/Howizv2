@@ -98,6 +98,27 @@ bool ProfileManager::serialize(const std::string& path, const AudioEngineParams&
     fprintf(f, "outputMute=%d\n", params.outputMute ? 1 : 0);
     fprintf(f, "boostEnabled=%d\n", params.boostEnabled ? 1 : 0);
 
+    // Tinnitus relief params
+    for (int i = 0; i < 6; i++) {
+        fprintf(f, "notch%d_enabled=%d\n", i, params.tinnitus.notches[i].enabled ? 1 : 0);
+        fprintf(f, "notch%d_frequency=%.1f\n", i, params.tinnitus.notches[i].frequency);
+        fprintf(f, "notch%d_Q=%.1f\n", i, params.tinnitus.notches[i].Q);
+    }
+    fprintf(f, "noiseType=%d\n", params.tinnitus.noiseType);
+    fprintf(f, "noiseLevel=%.2f\n", params.tinnitus.noiseLevel);
+    fprintf(f, "noiseLowCut=%.1f\n", params.tinnitus.noiseLowCut);
+    fprintf(f, "noiseHighCut=%.1f\n", params.tinnitus.noiseHighCut);
+    fprintf(f, "toneFinderEnabled=%d\n", params.tinnitus.toneFinderEnabled ? 1 : 0);
+    fprintf(f, "toneFinderFreq=%.1f\n", params.tinnitus.toneFinderFreq);
+    fprintf(f, "toneFinderLevel=%.2f\n", params.tinnitus.toneFinderLevel);
+    fprintf(f, "hfExtEnabled=%d\n", params.tinnitus.hfExtEnabled ? 1 : 0);
+    fprintf(f, "hfExtFreq=%.1f\n", params.tinnitus.hfExtFreq);
+    fprintf(f, "hfExtGainDb=%.1f\n", params.tinnitus.hfExtGainDb);
+    fprintf(f, "binauralEnabled=%d\n", params.tinnitus.binauralEnabled ? 1 : 0);
+    fprintf(f, "binauralCarrier=%.1f\n", params.tinnitus.binauralCarrier);
+    fprintf(f, "binauralBeat=%.1f\n", params.tinnitus.binauralBeat);
+    fprintf(f, "binauralLevel=%.2f\n", params.tinnitus.binauralLevel);
+
     fclose(f);
     return true;
 }
@@ -164,6 +185,31 @@ bool ProfileManager::deserialize(const std::string& path, AudioEngineParams& par
         else if (strcmp(key, "outputVolume") == 0)     params.outputVolume = atoi(val);
         else if (strcmp(key, "outputMute") == 0)       params.outputMute = atoi(val) != 0;
         else if (strcmp(key, "boostEnabled") == 0)     params.boostEnabled = atoi(val) != 0;
+        // Tinnitus relief params
+        else if (strncmp(key, "notch", 5) == 0) {
+            // Parse notch0_enabled, notch0_frequency, notch0_Q, etc.
+            int idx = key[5] - '0';
+            if (idx >= 0 && idx < 6) {
+                const char* field = key + 7;  // skip "notchN_"
+                if (strcmp(field, "enabled") == 0)   params.tinnitus.notches[idx].enabled = atoi(val) != 0;
+                else if (strcmp(field, "frequency") == 0) params.tinnitus.notches[idx].frequency = strtof(val, nullptr);
+                else if (strcmp(field, "Q") == 0)    params.tinnitus.notches[idx].Q = strtof(val, nullptr);
+            }
+        }
+        else if (strcmp(key, "noiseType") == 0)         params.tinnitus.noiseType = atoi(val);
+        else if (strcmp(key, "noiseLevel") == 0)        params.tinnitus.noiseLevel = strtof(val, nullptr);
+        else if (strcmp(key, "noiseLowCut") == 0)       params.tinnitus.noiseLowCut = strtof(val, nullptr);
+        else if (strcmp(key, "noiseHighCut") == 0)      params.tinnitus.noiseHighCut = strtof(val, nullptr);
+        else if (strcmp(key, "toneFinderEnabled") == 0) params.tinnitus.toneFinderEnabled = atoi(val) != 0;
+        else if (strcmp(key, "toneFinderFreq") == 0)    params.tinnitus.toneFinderFreq = strtof(val, nullptr);
+        else if (strcmp(key, "toneFinderLevel") == 0)   params.tinnitus.toneFinderLevel = strtof(val, nullptr);
+        else if (strcmp(key, "hfExtEnabled") == 0)      params.tinnitus.hfExtEnabled = atoi(val) != 0;
+        else if (strcmp(key, "hfExtFreq") == 0)         params.tinnitus.hfExtFreq = strtof(val, nullptr);
+        else if (strcmp(key, "hfExtGainDb") == 0)       params.tinnitus.hfExtGainDb = strtof(val, nullptr);
+        else if (strcmp(key, "binauralEnabled") == 0)   params.tinnitus.binauralEnabled = atoi(val) != 0;
+        else if (strcmp(key, "binauralCarrier") == 0)   params.tinnitus.binauralCarrier = strtof(val, nullptr);
+        else if (strcmp(key, "binauralBeat") == 0)      params.tinnitus.binauralBeat = strtof(val, nullptr);
+        else if (strcmp(key, "binauralLevel") == 0)     params.tinnitus.binauralLevel = strtof(val, nullptr);
     }
 
     fclose(f);
