@@ -18,6 +18,44 @@
  * DSP chain: HPF → LPF → EQ(3-band) → [VoiceExclusion] → [NS] → [AGC] → OutputGain → Clamp → Mute
  */
 
+// Tinnitus Relief Parameters
+struct TinnitusReliefParams {
+    // Notch filters (6 configurable notch filters for tinnitus frequency suppression)
+    struct NotchConfig {
+        bool enabled = false;
+        float frequency = 4000.0f;   // Center frequency (500-12000 Hz)
+        float Q = 8.0f;              // Quality factor (1-16, higher = narrower)
+    } notches[6];
+
+    // Masking noise generator
+    int noiseType = 0;               // 0=OFF, 1=WHITE, 2=PINK, 3=BROWN
+    float noiseLevel = 0.3f;         // 0.0-1.0 mix level
+    float noiseLowCut = 100.0f;      // Low cutoff Hz (20-2000)
+    float noiseHighCut = 8000.0f;    // High cutoff Hz (1000-16000)
+
+    // Tone finder (pure tone generator for pitch matching)
+    bool toneFinderEnabled = false;
+    float toneFinderFreq = 4000.0f;  // Frequency (200-12000 Hz)
+    float toneFinderLevel = 0.3f;    // 0.0-1.0 output level
+
+    // High frequency extension (shelf boost)
+    bool hfExtEnabled = false;
+    float hfExtFreq = 8000.0f;       // Shelf frequency (4000-12000 Hz)
+    float hfExtGainDb = 6.0f;        // 0-12 dB boost
+
+    // Binaural beats generator
+    bool binauralEnabled = false;
+    float binauralCarrier = 200.0f;  // Base frequency (50-500 Hz)
+    float binauralBeat = 10.0f;      // Beat frequency (1-40 Hz)
+    float binauralLevel = 0.3f;      // 0.0-1.0 output level
+
+    // Session timer
+    bool sessionActive = false;
+    uint32_t sessionDurationMs = 3600000;  // Session length (default 1 hour)
+    uint32_t sessionElapsedMs = 0;         // Elapsed time
+    float sessionFadeMs = 30000.0f;        // Fade in/out duration (30 sec)
+};
+
 struct AudioEngineParams {
     // Input
     float micGain         = 180.0f;  // ES7210 PGA (0-240)
@@ -46,15 +84,15 @@ struct AudioEngineParams {
 
     // Voice Exclusion (NLMS adaptive filter @ 16kHz, uses headset mic as reference)
     bool  veEnabled        = false;
-    float veBlend          = 0.5f;     // 0.0–1.0: mix of original vs cleaned (reduced for stability)
-    float veStepSize       = 0.08f;    // 0.01–1.0: NLMS adaptation rate (slower for transient rejection)
-    int   veFilterLength   = 64;       // 16–512 taps (shorter for faster adaptation)
-    float veMaxAttenuation = 0.6f;     // 0.0–1.0: safety limit (reduced for stability)
+    float veBlend          = 0.7f;     // 0.0–1.0: mix of original vs cleaned (higher for better cancellation)
+    float veStepSize       = 0.10f;    // 0.01–1.0: NLMS adaptation rate (slightly faster convergence)
+    int   veFilterLength   = 128;      // 16–512 taps (longer for better voice modeling ~8ms)
+    float veMaxAttenuation = 0.8f;     // 0.0–1.0: safety limit (more aggressive cancellation)
 
     // Voice Exclusion - Reference signal conditioning (applied to HP mic before NLMS)
     float veRefGain        = 0.5f;     // 0.1–5.0: reference signal gain multiplier (reduced)
-    float veRefHpf         = 150.0f;   // 20–500 Hz: reference HPF (raised to reject footsteps)
-    float veRefLpf         = 3000.0f;  // 1000–8000 Hz: reference LPF (tightened for voice)
+    float veRefHpf         = 80.0f;    // 20–500 Hz: reference HPF (matches UI default)
+    float veRefLpf         = 4000.0f;  // 1000–8000 Hz: reference LPF (matches UI default)
 
     // Voice Exclusion - AEC mode (alternative to NLMS)
     int   veMode           = 0;        // 0=NLMS, 1=AEC
@@ -72,6 +110,9 @@ struct AudioEngineParams {
     int   outputVolume    = 100;     // Codec volume (0-100)
     bool  outputMute      = true;    // MUTED by default (safety)
     bool  boostEnabled    = false;   // Enable soft clipping for high gain levels
+
+    // Tinnitus Relief (embedded struct)
+    TinnitusReliefParams tinnitus;
 };
 
 struct AudioLevels {
@@ -131,6 +172,25 @@ public:
     void setVeVadGateEnabled(bool enabled);
     void setVeVadGateAtten(float atten);
 
+    // Tinnitus relief setters
+    void setNotchEnabled(int idx, bool enabled);
+    void setNotchFrequency(int idx, float freq);
+    void setNotchQ(int idx, float Q);
+    void setNoiseType(int type);
+    void setNoiseLevel(float level);
+    void setNoiseLowCut(float freq);
+    void setNoiseHighCut(float freq);
+    void setToneFinderEnabled(bool enabled);
+    void setToneFinderFreq(float freq);
+    void setToneFinderLevel(float level);
+    void setHfExtEnabled(bool enabled);
+    void setHfExtFreq(float freq);
+    void setHfExtGainDb(float gainDb);
+    void setBinauralEnabled(bool enabled);
+    void setBinauralCarrier(float freq);
+    void setBinauralBeat(float freq);
+    void setBinauralLevel(float level);
+
 private:
     AudioEngine() = default;
     ~AudioEngine() = default;
@@ -150,6 +210,8 @@ private:
     void calcHpfCoeffs(Biquad& bq, float freq, float sampleRate);
     void calcLpfCoeffs(Biquad& bq, float freq, float sampleRate);
     void calcPeakEqCoeffs(Biquad& bq, float freq, float gainDb, float Q, float sampleRate);
+    void calcNotchCoeffs(Biquad& bq, float freq, float Q, float sampleRate);
+    void calcHighShelfCoeffs(Biquad& bq, float freq, float gainDb, float sampleRate);
     void recalcAllCoeffs();
 
     // FreeRTOS task
@@ -166,6 +228,21 @@ private:
     // VE reference signal conditioning filters (mono, applied to HP mic)
     Biquad _veRefHpfBq;
     Biquad _veRefLpfBq;
+
+    // Tinnitus relief filters (per-channel)
+    Biquad _notchL[6], _notchR[6];    // 6 notch filters
+    Biquad _hfExtL, _hfExtR;           // High-frequency extension shelf
+    Biquad _noiseLpfL, _noiseLpfR;     // Noise band-limiting LPF
+    Biquad _noiseHpfL, _noiseHpfR;     // Noise band-limiting HPF
+
+    // Tone generator state
+    float _tonePhase = 0.0f;
+    float _binauralPhaseL = 0.0f;
+    float _binauralPhaseR = 0.0f;
+    uint32_t _noiseState = 0x12345678; // PRNG state for noise
+
+    // VAD gate smoothing state (prevents clicks on speech/silence transitions)
+    float _vadGateSmoothed = 1.0f;
 
     // State
     AudioEngineParams _params;

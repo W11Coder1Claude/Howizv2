@@ -158,15 +158,16 @@ public:
         float error = primary - estimate;
 
         // 4. Normalized step: stepSize / (power + floor)
-        float normStep = stepSize / (power + 1e-6f);
+        float normStep = stepSize / (power + 1e-4f);  // Larger floor for stability during quiet periods
 
         // 5. Update weights using true error
         for (int i = 0; i < _len; i++) {
             int idx = (_pos - i + _len) % _len;
             _weights[i] += normStep * error * _refBuf[idx];
-            // Coefficient sanity check
-            if (fabsf(_weights[i]) > 10.0f) {
-                _weights[i] = 0.0f;
+            // Coefficient sanity check - soft clipping with gradual decay
+            constexpr float maxWeight = 5.0f;
+            if (fabsf(_weights[i]) > maxWeight) {
+                _weights[i] *= 0.95f;  // Gradual decay instead of hard reset
             }
         }
 
@@ -271,6 +272,48 @@ void AudioEngine::calcPeakEqCoeffs(Biquad& bq, float freq, float gainDb, float Q
     bq.a2 = (1.0f - alpha / A) / a0;
 }
 
+// Notch filter coefficients (Audio EQ Cookbook - notch/band-stop)
+void AudioEngine::calcNotchCoeffs(Biquad& bq, float freq, float Q, float sampleRate)
+{
+    float w0 = 2.0f * M_PI * freq / sampleRate;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float alpha = sinw0 / (2.0f * Q);
+
+    float a0 = 1.0f + alpha;
+    bq.b0 = 1.0f / a0;
+    bq.b1 = (-2.0f * cosw0) / a0;
+    bq.b2 = 1.0f / a0;
+    bq.a1 = (-2.0f * cosw0) / a0;
+    bq.a2 = (1.0f - alpha) / a0;
+}
+
+// High-shelf filter coefficients (Audio EQ Cookbook)
+void AudioEngine::calcHighShelfCoeffs(Biquad& bq, float freq, float gainDb, float sampleRate)
+{
+    if (fabsf(gainDb) < 0.1f) {
+        // Unity gain - bypass
+        bq.b0 = 1.0f; bq.b1 = 0.0f; bq.b2 = 0.0f;
+        bq.a1 = 0.0f; bq.a2 = 0.0f;
+        return;
+    }
+
+    float A = powf(10.0f, gainDb / 40.0f);
+    float w0 = 2.0f * M_PI * freq / sampleRate;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float S = 1.0f;  // Shelf slope
+    float alpha = sinw0 / 2.0f * sqrtf((A + 1.0f/A) * (1.0f/S - 1.0f) + 2.0f);
+    float sqrtA2alpha = 2.0f * sqrtf(A) * alpha;
+
+    float a0 = (A + 1.0f) - (A - 1.0f) * cosw0 + sqrtA2alpha;
+    bq.b0 = (A * ((A + 1.0f) + (A - 1.0f) * cosw0 + sqrtA2alpha)) / a0;
+    bq.b1 = (-2.0f * A * ((A - 1.0f) + (A + 1.0f) * cosw0)) / a0;
+    bq.b2 = (A * ((A + 1.0f) + (A - 1.0f) * cosw0 - sqrtA2alpha)) / a0;
+    bq.a1 = (2.0f * ((A - 1.0f) - (A + 1.0f) * cosw0)) / a0;
+    bq.a2 = ((A + 1.0f) - (A - 1.0f) * cosw0 - sqrtA2alpha) / a0;
+}
+
 void AudioEngine::recalcAllCoeffs()
 {
     // HPF
@@ -294,6 +337,36 @@ void AudioEngine::recalcAllCoeffs()
     // VE reference signal conditioning filters (mono, applied to HP mic at 48kHz)
     calcHpfCoeffs(_veRefHpfBq, _params.veRefHpf, SAMPLE_RATE);
     calcLpfCoeffs(_veRefLpfBq, _params.veRefLpf, SAMPLE_RATE);
+
+    // Tinnitus relief: Notch filters (6 pairs)
+    for (int i = 0; i < 6; i++) {
+        auto& n = _params.tinnitus.notches[i];
+        if (n.enabled) {
+            calcNotchCoeffs(_notchL[i], n.frequency, n.Q, SAMPLE_RATE);
+            calcNotchCoeffs(_notchR[i], n.frequency, n.Q, SAMPLE_RATE);
+        } else {
+            // Bypass - unity gain
+            _notchL[i].b0 = 1.0f; _notchL[i].b1 = 0.0f; _notchL[i].b2 = 0.0f;
+            _notchL[i].a1 = 0.0f; _notchL[i].a2 = 0.0f;
+            _notchR[i] = _notchL[i];
+        }
+    }
+
+    // Tinnitus relief: High-frequency extension shelf
+    if (_params.tinnitus.hfExtEnabled) {
+        calcHighShelfCoeffs(_hfExtL, _params.tinnitus.hfExtFreq, _params.tinnitus.hfExtGainDb, SAMPLE_RATE);
+        calcHighShelfCoeffs(_hfExtR, _params.tinnitus.hfExtFreq, _params.tinnitus.hfExtGainDb, SAMPLE_RATE);
+    } else {
+        _hfExtL.b0 = 1.0f; _hfExtL.b1 = 0.0f; _hfExtL.b2 = 0.0f;
+        _hfExtL.a1 = 0.0f; _hfExtL.a2 = 0.0f;
+        _hfExtR = _hfExtL;
+    }
+
+    // Tinnitus relief: Noise bandpass filters
+    calcHpfCoeffs(_noiseHpfL, _params.tinnitus.noiseLowCut, SAMPLE_RATE);
+    calcHpfCoeffs(_noiseHpfR, _params.tinnitus.noiseLowCut, SAMPLE_RATE);
+    calcLpfCoeffs(_noiseLpfL, _params.tinnitus.noiseHighCut, SAMPLE_RATE);
+    calcLpfCoeffs(_noiseLpfR, _params.tinnitus.noiseHighCut, SAMPLE_RATE);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -773,6 +846,132 @@ void AudioEngine::setMute(bool mute)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Tinnitus Relief Setters
+// ─────────────────────────────────────────────────────────────────────────────
+
+void AudioEngine::setNotchEnabled(int idx, bool enabled)
+{
+    if (idx < 0 || idx >= 6) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.notches[idx].enabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNotchFrequency(int idx, float freq)
+{
+    if (idx < 0 || idx >= 6) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.notches[idx].frequency = std::clamp(freq, 500.0f, 12000.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNotchQ(int idx, float Q)
+{
+    if (idx < 0 || idx >= 6) return;
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.notches[idx].Q = std::clamp(Q, 1.0f, 16.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNoiseType(int type)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.noiseType = std::clamp(type, 0, 3);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNoiseLevel(float level)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.noiseLevel = std::clamp(level, 0.0f, 1.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNoiseLowCut(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.noiseLowCut = std::clamp(freq, 20.0f, 2000.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setNoiseHighCut(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.noiseHighCut = std::clamp(freq, 1000.0f, 16000.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setToneFinderEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.toneFinderEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setToneFinderFreq(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.toneFinderFreq = std::clamp(freq, 200.0f, 12000.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setToneFinderLevel(float level)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.toneFinderLevel = std::clamp(level, 0.0f, 1.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setHfExtEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.hfExtEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setHfExtFreq(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.hfExtFreq = std::clamp(freq, 4000.0f, 12000.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setHfExtGainDb(float gainDb)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.hfExtGainDb = std::clamp(gainDb, 0.0f, 12.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setBinauralEnabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.binauralEnabled = enabled;
+    _paramsChanged = true;
+}
+
+void AudioEngine::setBinauralCarrier(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.binauralCarrier = std::clamp(freq, 50.0f, 500.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setBinauralBeat(float freq)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.binauralBeat = std::clamp(freq, 1.0f, 40.0f);
+    _paramsChanged = true;
+}
+
+void AudioEngine::setBinauralLevel(float level)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _params.tinnitus.binauralLevel = std::clamp(level, 0.0f, 1.0f);
+    _paramsChanged = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Audio processing task (runs on Core 1)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1014,9 +1213,10 @@ void AudioEngine::processLoop()
                 }
             }
 
-            // Handle VAD enable/mode changes
+            // Handle VAD enable/mode changes (now shared by both NLMS and AEC modes)
             {
-                bool vadWanted = localParams.veEnabled && localParams.veMode == 1 && localParams.veVadEnabled;
+                // VAD is wanted when VE is enabled AND VAD is enabled (works with both modes)
+                bool vadWanted = localParams.veEnabled && localParams.veVadEnabled;
                 if (vadWanted != prevVeVadEnabled || localParams.veVadMode != prevVeVadMode) {
                     if (vadWanted) {
                         destroyVadHandle(_vadHandleRef);
@@ -1120,6 +1320,88 @@ void AudioEngine::processLoop()
             floatR[i] = _eqHighR.process(floatR[i]);
         }
 
+        // ── 5b. Tinnitus Relief: Notch Filters (6 configurable) ──
+        for (int n = 0; n < 6; n++) {
+            if (localParams.tinnitus.notches[n].enabled) {
+                for (int i = 0; i < samplesRead; i++) {
+                    floatL[i] = _notchL[n].process(floatL[i]);
+                    floatR[i] = _notchR[n].process(floatR[i]);
+                }
+            }
+        }
+
+        // ── 5c. Tinnitus Relief: High-Frequency Extension (shelf boost) ──
+        if (localParams.tinnitus.hfExtEnabled) {
+            for (int i = 0; i < samplesRead; i++) {
+                floatL[i] = _hfExtL.process(floatL[i]);
+                floatR[i] = _hfExtR.process(floatR[i]);
+            }
+        }
+
+        // ── 5d. Tinnitus Relief: Add Masking Noise ──
+        if (localParams.tinnitus.noiseType > 0) {
+            float noiseLevel = localParams.tinnitus.noiseLevel;
+            for (int i = 0; i < samplesRead; i++) {
+                // XORshift PRNG for white noise
+                _noiseState ^= _noiseState << 13;
+                _noiseState ^= _noiseState >> 17;
+                _noiseState ^= _noiseState << 5;
+                float white = ((float)((int32_t)_noiseState) / 2147483648.0f);  // [-1, 1]
+
+                float noise = white;
+                if (localParams.tinnitus.noiseType == 2) {
+                    // Pink noise: simple IIR filter (Voss-McCartney approximation)
+                    static float pinkState = 0.0f;
+                    pinkState = 0.99765f * pinkState + white * 0.0990460f;
+                    noise = pinkState + white * 0.2f;
+                } else if (localParams.tinnitus.noiseType == 3) {
+                    // Brown noise: leaky integrator
+                    static float brownState = 0.0f;
+                    brownState = 0.998f * brownState + white * 0.02f;
+                    noise = brownState;
+                }
+
+                // Band-limit the noise
+                noise = _noiseHpfL.process(noise);
+                noise = _noiseLpfL.process(noise);
+
+                // Mix into output
+                floatL[i] += noise * noiseLevel;
+                floatR[i] += noise * noiseLevel;
+            }
+        }
+
+        // ── 5e. Tinnitus Relief: Tone Finder (pure tone generator) ──
+        if (localParams.tinnitus.toneFinderEnabled) {
+            float freq = localParams.tinnitus.toneFinderFreq;
+            float level = localParams.tinnitus.toneFinderLevel;
+            float phaseInc = 2.0f * M_PI * freq / (float)SAMPLE_RATE;
+            for (int i = 0; i < samplesRead; i++) {
+                float tone = sinf(_tonePhase) * level;
+                _tonePhase += phaseInc;
+                if (_tonePhase >= 2.0f * M_PI) _tonePhase -= 2.0f * M_PI;
+                floatL[i] += tone;
+                floatR[i] += tone;
+            }
+        }
+
+        // ── 5f. Tinnitus Relief: Binaural Beats ──
+        if (localParams.tinnitus.binauralEnabled) {
+            float carrier = localParams.tinnitus.binauralCarrier;
+            float beat = localParams.tinnitus.binauralBeat;
+            float level = localParams.tinnitus.binauralLevel;
+            float phaseIncL = 2.0f * M_PI * carrier / (float)SAMPLE_RATE;
+            float phaseIncR = 2.0f * M_PI * (carrier + beat) / (float)SAMPLE_RATE;
+            for (int i = 0; i < samplesRead; i++) {
+                floatL[i] += sinf(_binauralPhaseL) * level;
+                floatR[i] += sinf(_binauralPhaseR) * level;
+                _binauralPhaseL += phaseIncL;
+                _binauralPhaseR += phaseIncR;
+                if (_binauralPhaseL >= 2.0f * M_PI) _binauralPhaseL -= 2.0f * M_PI;
+                if (_binauralPhaseR >= 2.0f * M_PI) _binauralPhaseR -= 2.0f * M_PI;
+            }
+        }
+
         // ── 6. Reference signal conditioning (applied to HP mic before VE) ──
         // Apply gain, HPF, LPF to the reference signal so NLMS sees clean voice
         {
@@ -1161,19 +1443,49 @@ void AudioEngine::processLoop()
             float maxAtt = localParams.veMaxAttenuation;
 
             if (localParams.veMode == 0 && _nlmsL && _nlmsR) {
-                // ── NLMS mode (existing, unchanged) ──
+                // ── NLMS mode with VAD-based double-talk protection ──
                 float step = localParams.veStepSize;
 
                 veResDownL.downsample3(floatL, veDown16kL, NS_FRAME_16K);
                 veResDownR.downsample3(floatR, veDown16kR, NS_FRAME_16K);
                 veResDownHP.downsample3(floatHP, veDown16kHP, NS_FRAME_16K);
 
+                // Run VAD on reference signal for double-talk protection
+                bool refSpeechActive = false;
+                if (_vadHandleRef && localParams.veVadEnabled) {
+                    // Convert 16kHz float to int16 for VAD (reuse existing buffer space)
+                    for (int i = 0; i < NS_FRAME_16K; i++) {
+                        float s = std::clamp(veDown16kHP[i], -1.0f, 1.0f);
+                        ns16kIn[i] = static_cast<int16_t>(s * 32767.0f);
+                    }
+                    // VAD processes 10ms frames (160 samples @ 16kHz)
+                    vad_state_t vadState = vad_process(
+                        static_cast<vad_handle_t>(_vadHandleRef),
+                        ns16kIn, 16000, 10);
+                    refSpeechActive = (vadState == VAD_SPEECH);
+                    {
+                        std::lock_guard<std::mutex> lock(_mutex);
+                        _levels.vadSpeechDetected = refSpeechActive;
+                    }
+                } else {
+                    // No VAD available, use simple RMS threshold for speech detection
+                    float refRms = 0.0f;
+                    for (int i = 0; i < NS_FRAME_16K; i++) {
+                        refRms += veDown16kHP[i] * veDown16kHP[i];
+                    }
+                    refRms = sqrtf(refRms / NS_FRAME_16K);
+                    refSpeechActive = (refRms > 0.02f);  // Simple threshold
+                }
+
+                // Gate step size: reduce during non-speech to prevent incorrect adaptation
+                float effectiveStep = refSpeechActive ? step : 0.001f;
+
                 auto* nlL = static_cast<NlmsFilter*>(_nlmsL);
                 auto* nlR = static_cast<NlmsFilter*>(_nlmsR);
 
                 for (int i = 0; i < NS_FRAME_16K; i++) {
-                    veEst16kL[i] = nlL->process(veDown16kHP[i], veDown16kL[i], step);
-                    veEst16kR[i] = nlR->process(veDown16kHP[i], veDown16kR[i], step);
+                    veEst16kL[i] = nlL->process(veDown16kHP[i], veDown16kL[i], effectiveStep);
+                    veEst16kR[i] = nlR->process(veDown16kHP[i], veDown16kR[i], effectiveStep);
                 }
 
                 veResUpL.upsample3(veEst16kL, veEstUp48kL, NS_FRAME_16K);
@@ -1289,20 +1601,28 @@ void AudioEngine::processLoop()
             }
         }
 
-        // ── 7b. VAD-based gating (attenuate output during non-speech) ──
+        // ── 7b. VAD-based gating with smoothing (attenuate output during non-speech) ──
         // This reduces transient sounds (footsteps, etc.) when VAD detects silence
-        if (localParams.veVadGateEnabled && localParams.veEnabled && localParams.veMode == 1) {
+        // Now works with both NLMS and AEC modes
+        if (localParams.veVadGateEnabled && localParams.veEnabled) {
             bool speechDetected = false;
             {
                 std::lock_guard<std::mutex> lock(_mutex);
                 speechDetected = _levels.vadSpeechDetected;
             }
-            if (!speechDetected) {
-                float vadMuteFactor = localParams.veVadGateAtten;  // e.g., 0.15 = -16dB
-                for (int i = 0; i < samplesRead; i++) {
-                    floatL[i] *= vadMuteFactor;
-                    floatR[i] *= vadMuteFactor;
-                }
+
+            // Calculate target gate value
+            float target = speechDetected ? 1.0f : localParams.veVadGateAtten;
+
+            // Apply exponential smoothing to prevent clicks on transitions
+            // Smoothing: 0.95 gives ~200ms attack/release at 48kHz/480 block size
+            constexpr float smoothAlpha = 0.05f;  // 5% per block toward target
+            _vadGateSmoothed = (1.0f - smoothAlpha) * _vadGateSmoothed + smoothAlpha * target;
+
+            // Apply smoothed gate to output
+            for (int i = 0; i < samplesRead; i++) {
+                floatL[i] *= _vadGateSmoothed;
+                floatR[i] *= _vadGateSmoothed;
             }
         }
 

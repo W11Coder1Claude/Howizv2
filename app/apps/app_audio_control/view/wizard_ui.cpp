@@ -114,6 +114,41 @@ void WizardUI::update()
                 lv_obj_set_style_text_color(_veVadStatusLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
             }
         }
+
+        // Update level match indicator (HP mic vs Main mic ratio)
+        // Helps user calibrate ref gain for optimal VE performance
+        if (_veLevelMatchIndicator && _veLevelMatchLabel) {
+            // Calculate average RMS of main mics
+            float mainRms = (levels.rmsLeft + levels.rmsRight) * 0.5f;
+            float hpRms = levels.rmsHP;
+
+            // Calculate ratio (HP/Main) - ideal is ~1.0
+            float ratio = 0.0f;
+            uint32_t indicatorColor = MUTED_TEXT;
+            char ratioText[16] = "---";
+
+            if (mainRms > 0.001f && hpRms > 0.001f) {
+                ratio = hpRms / mainRms;
+
+                // Determine color based on ratio
+                if (ratio >= 0.8f && ratio <= 1.2f) {
+                    // Good match
+                    indicatorColor = METER_GREEN;
+                } else if ((ratio >= 0.5f && ratio < 0.8f) || (ratio > 1.2f && ratio <= 2.0f)) {
+                    // Needs adjustment
+                    indicatorColor = METER_YELLOW;
+                } else {
+                    // Severe mismatch
+                    indicatorColor = METER_RED;
+                }
+
+                snprintf(ratioText, sizeof(ratioText), "%.1fx", ratio);
+            }
+
+            lv_obj_set_style_bg_color(_veLevelMatchIndicator, lv_color_hex(indicatorColor), LV_PART_MAIN);
+            lv_label_set_text(_veLevelMatchLabel, ratioText);
+            lv_obj_set_style_text_color(_veLevelMatchLabel, lv_color_hex(indicatorColor), LV_PART_MAIN);
+        }
     }
 #endif
 }
@@ -214,20 +249,21 @@ void WizardUI::createNavSidebar()
         return btn;
     };
 
-    int startY = 20;
-    int btnStep = 82;
+    int startY = 10;
+    int btnStep = 68;  // Reduced to fit 6 buttons
     _navBtnFilter   = makeNavBtn("FILTER", startY, 0);
     _navBtnEq       = makeNavBtn("EQ", startY + btnStep, 1);
     _navBtnOutput   = makeNavBtn("OUTPUT", startY + btnStep * 2, 2);
     _navBtnVoice    = makeNavBtn("VOICE", startY + btnStep * 3, 3);
     _navBtnProfiles = makeNavBtn("PROF", startY + btnStep * 4, 4);
+    _navBtnTinnitus = makeNavBtn("TINNI", startY + btnStep * 5, 5);
 
     // Decorative dividers between buttons
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         lv_obj_t* div = lv_obj_create(_navPanel);
         lv_obj_remove_style_all(div);
         lv_obj_set_size(div, NAV_W - 30, 1);
-        lv_obj_set_pos(div, 15, startY + 68 + i * btnStep);
+        lv_obj_set_pos(div, 15, startY + 62 + i * btnStep);
         lv_obj_set_style_bg_color(div, lv_color_hex(DARK_BORDER), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(div, LV_OPA_COVER, LV_PART_MAIN);
     }
@@ -266,6 +302,7 @@ void WizardUI::createContentArea()
     _panelOutput   = makePanel();
     _panelVoice    = makePanel();
     _panelProfiles = makePanel();
+    _panelTinnitus = makePanel();
 
     mclog::tagInfo(TAG, "  createContentArea: createFilterPanel...");
     createFilterPanel();
@@ -277,6 +314,8 @@ void WizardUI::createContentArea()
     createVoicePanel();
     mclog::tagInfo(TAG, "  createContentArea: createProfilesPanel...");
     createProfilesPanel();
+    mclog::tagInfo(TAG, "  createContentArea: createTinnitusPanel...");
+    createTinnitusPanel();
     mclog::tagInfo(TAG, "  createContentArea: done");
 }
 
@@ -837,6 +876,22 @@ void WizardUI::createVoicePanel()
     lv_obj_set_style_bg_color(_veHpMeterPeak, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(_veHpMeterPeak, LV_OPA_COVER, LV_PART_MAIN);
 
+    // Level Match Indicator (HP mic vs Main mic ratio)
+    // Green = good match (0.8-1.2), Yellow = adjust needed (0.5-0.8 or 1.2-2.0), Red = severe mismatch
+    _veLevelMatchIndicator = lv_obj_create(_panelVoice);
+    lv_obj_remove_style_all(_veLevelMatchIndicator);
+    lv_obj_set_size(_veLevelMatchIndicator, 16, 16);
+    lv_obj_set_pos(_veLevelMatchIndicator, valX + 80, 186);
+    lv_obj_set_style_bg_color(_veLevelMatchIndicator, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(_veLevelMatchIndicator, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(_veLevelMatchIndicator, 8, LV_PART_MAIN);  // Circle
+
+    _veLevelMatchLabel = lv_label_create(_panelVoice);
+    lv_label_set_text(_veLevelMatchLabel, "---");
+    lv_obj_set_style_text_font(_veLevelMatchLabel, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_veLevelMatchLabel, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
+    lv_obj_set_pos(_veLevelMatchLabel, valX + 100, 187);
+
     // Blend
     createValueLabel(_panelVoice, "Blend:", 60, 216);
     _veBlendSlider = lv_slider_create(_panelVoice);
@@ -906,9 +961,9 @@ void WizardUI::createVoicePanel()
     createDiamondDivider(_panelVoice, 400, 800);
 
     // ══════════════════════════════════════════════════════════════════════
-    // VAD Gating Controls (attenuate during non-speech)
+    // VAD Gating Controls (attenuate during non-speech, works with both modes)
     // ══════════════════════════════════════════════════════════════════════
-    createSectionLabel(_panelVoice, "VAD GATING (AEC MODE)", 60, 410);
+    createSectionLabel(_panelVoice, "VAD GATING", 60, 410);
 
     _veVadGateToggle = lv_btn_create(_panelVoice);
     lv_obj_set_size(_veVadGateToggle, 100, 36);
@@ -941,7 +996,7 @@ void WizardUI::createVoicePanel()
     lv_obj_set_pos(_veVadStatusLabel, 850, 453);
 
     lv_obj_t* nlmsNote = lv_label_create(_panelVoice);
-    lv_label_set_text(nlmsNote, "VAD gate requires AEC mode (engine setting)  |  Reduces transients during silence");
+    lv_label_set_text(nlmsNote, "VAD gate works with both NLMS & AEC  |  Reduces transients during silence  |  Match indicator: aim for green");
     lv_obj_set_style_text_font(nlmsNote, &lv_font_montserrat_14, LV_PART_MAIN);
     lv_obj_set_style_text_color(nlmsNote, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
     lv_obj_set_pos(nlmsNote, 60, 495);
@@ -999,6 +1054,274 @@ void WizardUI::createProfilesPanel()
     _profileSaveBtn = nullptr;
     _profileDeleteBtn = nullptr;
     _profileSetDefaultBtn = nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Panel 6: TINNITUS RELIEF
+// ─────────────────────────────────────────────────────────────────────────────
+
+void WizardUI::createTinnitusPanel()
+{
+    int sliderX = 280;  // Standard slider X position
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Section 1: Notch Filters (2 visible, 6 available in engine)
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelTinnitus, "NOTCH FILTERS (Tinnitus Suppression)", 60, 10);
+
+    for (int n = 0; n < 2; n++) {
+        int baseY = 40 + n * 70;
+
+        // Toggle
+        _notchToggle[n] = lv_btn_create(_panelTinnitus);
+        lv_obj_set_size(_notchToggle[n], 80, 30);
+        lv_obj_set_pos(_notchToggle[n], 60, baseY);
+        styleToggleWizard(_notchToggle[n]);
+        lv_obj_set_user_data(_notchToggle[n], (void*)(intptr_t)n);
+        lv_obj_add_event_cb(_notchToggle[n], onNotchToggle, LV_EVENT_CLICKED, this);
+
+        lv_obj_t* togLbl = lv_label_create(_notchToggle[n]);
+        lv_label_set_text(togLbl, "OFF");
+        lv_obj_set_style_text_font(togLbl, &lv_font_montserrat_12, LV_PART_MAIN);
+        lv_obj_center(togLbl);
+
+        // Frequency slider
+        createValueLabel(_panelTinnitus, "Freq:", 160, baseY + 5);
+        _notchFreqSlider[n] = lv_slider_create(_panelTinnitus);
+        lv_obj_set_size(_notchFreqSlider[n], 350, 22);
+        lv_obj_set_pos(_notchFreqSlider[n], sliderX, baseY);
+        lv_slider_set_range(_notchFreqSlider[n], 500, 12000);
+        lv_slider_set_value(_notchFreqSlider[n], 4000 + n * 2000, LV_ANIM_OFF);
+        styleSliderWizard(_notchFreqSlider[n]);
+        lv_obj_set_user_data(_notchFreqSlider[n], (void*)(intptr_t)n);
+        lv_obj_add_event_cb(_notchFreqSlider[n], onNotchFreqChanged, LV_EVENT_VALUE_CHANGED, this);
+
+        char freqBuf[16];
+        snprintf(freqBuf, sizeof(freqBuf), "%d Hz", 4000 + n * 2000);
+        _notchFreqLabel[n] = createValueLabel(_panelTinnitus, freqBuf, 650, baseY + 5);
+
+        // Q slider
+        createValueLabel(_panelTinnitus, "Q:", 720, baseY + 5);
+        _notchQSlider[n] = lv_slider_create(_panelTinnitus);
+        lv_obj_set_size(_notchQSlider[n], 200, 22);
+        lv_obj_set_pos(_notchQSlider[n], 760, baseY);
+        lv_slider_set_range(_notchQSlider[n], 10, 160);  // 1.0 - 16.0
+        lv_slider_set_value(_notchQSlider[n], 80, LV_ANIM_OFF);  // Q=8
+        styleSliderWizard(_notchQSlider[n]);
+        lv_obj_set_user_data(_notchQSlider[n], (void*)(intptr_t)n);
+        lv_obj_add_event_cb(_notchQSlider[n], onNotchQChanged, LV_EVENT_VALUE_CHANGED, this);
+
+        _notchQLabel[n] = createValueLabel(_panelTinnitus, "8.0", 980, baseY + 5);
+    }
+
+    createDiamondDivider(_panelTinnitus, 178, 900);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Section 2: Masking Noise Generator
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelTinnitus, "MASKING NOISE", 60, 185);
+
+    // Noise type buttons
+    const char* noiseLabels[] = {"OFF", "WHITE", "PINK", "BROWN"};
+    for (int t = 0; t < 4; t++) {
+        _noiseTypeBtns[t] = lv_btn_create(_panelTinnitus);
+        lv_obj_set_size(_noiseTypeBtns[t], 110, 32);
+        lv_obj_set_pos(_noiseTypeBtns[t], 60 + t * 120, 215);
+        styleToggleWizard(_noiseTypeBtns[t]);
+        lv_obj_set_user_data(_noiseTypeBtns[t], (void*)(intptr_t)t);
+        lv_obj_add_event_cb(_noiseTypeBtns[t], onNoiseTypeClicked, LV_EVENT_CLICKED, this);
+
+        lv_obj_t* lbl = lv_label_create(_noiseTypeBtns[t]);
+        lv_label_set_text(lbl, noiseLabels[t]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, LV_PART_MAIN);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(LAVENDER), LV_PART_MAIN);
+        lv_obj_center(lbl);
+    }
+    // Highlight OFF
+    lv_obj_set_style_border_color(_noiseTypeBtns[0], lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+
+    // Level slider
+    createValueLabel(_panelTinnitus, "Level:", 560, 222);
+    _noiseLevelSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_noiseLevelSlider, 280, 22);
+    lv_obj_set_pos(_noiseLevelSlider, 620, 218);
+    lv_slider_set_range(_noiseLevelSlider, 0, 100);
+    lv_slider_set_value(_noiseLevelSlider, 30, LV_ANIM_OFF);
+    styleSliderWizard(_noiseLevelSlider);
+    lv_obj_add_event_cb(_noiseLevelSlider, onNoiseLevelChanged, LV_EVENT_VALUE_CHANGED, this);
+    _noiseLevelLabel = createValueLabel(_panelTinnitus, "30%", 920, 222);
+
+    // Band limiting
+    createValueLabel(_panelTinnitus, "Low Cut:", 60, 260);
+    _noiseLowCutSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_noiseLowCutSlider, 350, 22);
+    lv_obj_set_pos(_noiseLowCutSlider, 160, 258);
+    lv_slider_set_range(_noiseLowCutSlider, 20, 2000);
+    lv_slider_set_value(_noiseLowCutSlider, 100, LV_ANIM_OFF);
+    styleSliderWizard(_noiseLowCutSlider);
+    lv_obj_add_event_cb(_noiseLowCutSlider, onNoiseLowCutChanged, LV_EVENT_VALUE_CHANGED, this);
+    _noiseLowCutLabel = createValueLabel(_panelTinnitus, "100 Hz", 530, 260);
+
+    createValueLabel(_panelTinnitus, "High Cut:", 620, 260);
+    _noiseHighCutSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_noiseHighCutSlider, 250, 22);
+    lv_obj_set_pos(_noiseHighCutSlider, 720, 258);
+    lv_slider_set_range(_noiseHighCutSlider, 1000, 16000);
+    lv_slider_set_value(_noiseHighCutSlider, 8000, LV_ANIM_OFF);
+    styleSliderWizard(_noiseHighCutSlider);
+    lv_obj_add_event_cb(_noiseHighCutSlider, onNoiseHighCutChanged, LV_EVENT_VALUE_CHANGED, this);
+    _noiseHighCutLabel = createValueLabel(_panelTinnitus, "8000 Hz", 980, 260);
+
+    createDiamondDivider(_panelTinnitus, 295, 900);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Section 3: Tone Finder
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelTinnitus, "TONE FINDER (Pitch Matching)", 60, 302);
+
+    _toneFinderToggle = lv_btn_create(_panelTinnitus);
+    lv_obj_set_size(_toneFinderToggle, 80, 30);
+    lv_obj_set_pos(_toneFinderToggle, 60, 332);
+    styleToggleWizard(_toneFinderToggle);
+    lv_obj_add_event_cb(_toneFinderToggle, onToneFinderToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* toneTogLbl = lv_label_create(_toneFinderToggle);
+    lv_label_set_text(toneTogLbl, "OFF");
+    lv_obj_set_style_text_font(toneTogLbl, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_center(toneTogLbl);
+
+    createValueLabel(_panelTinnitus, "Freq:", 160, 337);
+    _toneFinderFreqSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_toneFinderFreqSlider, 420, 22);
+    lv_obj_set_pos(_toneFinderFreqSlider, 220, 333);
+    lv_slider_set_range(_toneFinderFreqSlider, 200, 12000);
+    lv_slider_set_value(_toneFinderFreqSlider, 4000, LV_ANIM_OFF);
+    styleSliderWizard(_toneFinderFreqSlider);
+    lv_obj_add_event_cb(_toneFinderFreqSlider, onToneFinderFreqChanged, LV_EVENT_VALUE_CHANGED, this);
+    _toneFinderFreqLabel = createValueLabel(_panelTinnitus, "4000 Hz", 660, 337);
+
+    createValueLabel(_panelTinnitus, "Level:", 760, 337);
+    _toneFinderLevelSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_toneFinderLevelSlider, 150, 22);
+    lv_obj_set_pos(_toneFinderLevelSlider, 820, 333);
+    lv_slider_set_range(_toneFinderLevelSlider, 0, 100);
+    lv_slider_set_value(_toneFinderLevelSlider, 30, LV_ANIM_OFF);
+    styleSliderWizard(_toneFinderLevelSlider);
+    lv_obj_add_event_cb(_toneFinderLevelSlider, onToneFinderLevelChanged, LV_EVENT_VALUE_CHANGED, this);
+    _toneFinderLevelLabel = createValueLabel(_panelTinnitus, "30%", 980, 337);
+
+    // Transfer to notch button
+    _toneFinderTransferBtn = lv_btn_create(_panelTinnitus);
+    lv_obj_set_size(_toneFinderTransferBtn, 160, 30);
+    lv_obj_set_pos(_toneFinderTransferBtn, 60, 370);
+    styleToggleWizard(_toneFinderTransferBtn);
+    lv_obj_set_style_border_color(_toneFinderTransferBtn, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+    lv_obj_add_event_cb(_toneFinderTransferBtn, onToneFinderTransfer, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* transLbl = lv_label_create(_toneFinderTransferBtn);
+    lv_label_set_text(transLbl, "Copy to Notch 1");
+    lv_obj_set_style_text_font(transLbl, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(transLbl, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+    lv_obj_center(transLbl);
+
+    createDiamondDivider(_panelTinnitus, 408, 900);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Section 4: HF Extension + Binaural Beats
+    // ══════════════════════════════════════════════════════════════════════
+    createSectionLabel(_panelTinnitus, "HIGH-FREQ EXTENSION", 60, 415);
+
+    _hfExtToggle = lv_btn_create(_panelTinnitus);
+    lv_obj_set_size(_hfExtToggle, 70, 28);
+    lv_obj_set_pos(_hfExtToggle, 60, 442);
+    styleToggleWizard(_hfExtToggle);
+    lv_obj_add_event_cb(_hfExtToggle, onHfExtToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* hfTogLbl = lv_label_create(_hfExtToggle);
+    lv_label_set_text(hfTogLbl, "OFF");
+    lv_obj_set_style_text_font(hfTogLbl, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_center(hfTogLbl);
+
+    createValueLabel(_panelTinnitus, "Freq:", 140, 448);
+    _hfExtFreqSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_hfExtFreqSlider, 150, 20);
+    lv_obj_set_pos(_hfExtFreqSlider, 190, 445);
+    lv_slider_set_range(_hfExtFreqSlider, 4000, 12000);
+    lv_slider_set_value(_hfExtFreqSlider, 8000, LV_ANIM_OFF);
+    styleSliderWizard(_hfExtFreqSlider);
+    lv_obj_add_event_cb(_hfExtFreqSlider, onHfExtFreqChanged, LV_EVENT_VALUE_CHANGED, this);
+    _hfExtFreqLabel = createValueLabel(_panelTinnitus, "8k", 350, 448);
+
+    createValueLabel(_panelTinnitus, "Boost:", 400, 448);
+    _hfExtGainSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_hfExtGainSlider, 100, 20);
+    lv_obj_set_pos(_hfExtGainSlider, 460, 445);
+    lv_slider_set_range(_hfExtGainSlider, 0, 120);  // 0-12 dB
+    lv_slider_set_value(_hfExtGainSlider, 60, LV_ANIM_OFF);
+    styleSliderWizard(_hfExtGainSlider);
+    lv_obj_add_event_cb(_hfExtGainSlider, onHfExtGainChanged, LV_EVENT_VALUE_CHANGED, this);
+    _hfExtGainLabel = createValueLabel(_panelTinnitus, "6dB", 575, 448);
+
+    // Binaural beats section (same row)
+    createSectionLabel(_panelTinnitus, "BINAURAL BEATS", 630, 415);
+
+    _binauralToggle = lv_btn_create(_panelTinnitus);
+    lv_obj_set_size(_binauralToggle, 70, 28);
+    lv_obj_set_pos(_binauralToggle, 630, 442);
+    styleToggleWizard(_binauralToggle);
+    lv_obj_add_event_cb(_binauralToggle, onBinauralToggle, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* binTogLbl = lv_label_create(_binauralToggle);
+    lv_label_set_text(binTogLbl, "OFF");
+    lv_obj_set_style_text_font(binTogLbl, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_center(binTogLbl);
+
+    // Binaural presets (Delta/Theta/Alpha/Beta)
+    const char* presetLabels[] = {"D", "T", "A", "B"};
+    for (int p = 0; p < 4; p++) {
+        _binauralPresetBtns[p] = lv_btn_create(_panelTinnitus);
+        lv_obj_set_size(_binauralPresetBtns[p], 50, 28);
+        lv_obj_set_pos(_binauralPresetBtns[p], 710 + p * 58, 442);
+        styleToggleWizard(_binauralPresetBtns[p]);
+        lv_obj_set_user_data(_binauralPresetBtns[p], (void*)(intptr_t)p);
+        lv_obj_add_event_cb(_binauralPresetBtns[p], onBinauralPresetClicked, LV_EVENT_CLICKED, this);
+
+        lv_obj_t* lbl = lv_label_create(_binauralPresetBtns[p]);
+        lv_label_set_text(lbl, presetLabels[p]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(LAVENDER), LV_PART_MAIN);
+        lv_obj_center(lbl);
+    }
+    // Highlight Alpha by default
+    lv_obj_set_style_border_color(_binauralPresetBtns[2], lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+
+    // Binaural beat slider
+    createValueLabel(_panelTinnitus, "Beat:", 630, 480);
+    _binauralBeatSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_binauralBeatSlider, 200, 20);
+    lv_obj_set_pos(_binauralBeatSlider, 680, 478);
+    lv_slider_set_range(_binauralBeatSlider, 1, 40);
+    lv_slider_set_value(_binauralBeatSlider, 10, LV_ANIM_OFF);
+    styleSliderWizard(_binauralBeatSlider);
+    lv_obj_add_event_cb(_binauralBeatSlider, onBinauralBeatChanged, LV_EVENT_VALUE_CHANGED, this);
+    _binauralBeatLabel = createValueLabel(_panelTinnitus, "10Hz", 900, 480);
+
+    createValueLabel(_panelTinnitus, "Level:", 630, 510);
+    _binauralLevelSlider = lv_slider_create(_panelTinnitus);
+    lv_obj_set_size(_binauralLevelSlider, 200, 20);
+    lv_obj_set_pos(_binauralLevelSlider, 690, 508);
+    lv_slider_set_range(_binauralLevelSlider, 0, 100);
+    lv_slider_set_value(_binauralLevelSlider, 30, LV_ANIM_OFF);
+    styleSliderWizard(_binauralLevelSlider);
+    lv_obj_add_event_cb(_binauralLevelSlider, onBinauralLevelChanged, LV_EVENT_VALUE_CHANGED, this);
+    _binauralLevelLabel = createValueLabel(_panelTinnitus, "30%", 900, 510);
+
+    // Info note
+    lv_obj_t* tinNote = lv_label_create(_panelTinnitus);
+    lv_label_set_text(tinNote, "Notched sound: suppresses tinnitus frequency | Pink/brown: relaxing masking | Binaural: entrainment");
+    lv_obj_set_style_text_font(tinNote, &lv_font_montserrat_12, LV_PART_MAIN);
+    lv_obj_set_style_text_color(tinNote, lv_color_hex(MUTED_TEXT), LV_PART_MAIN);
+    lv_obj_set_pos(tinNote, 60, 545);
 }
 
 void WizardUI::refreshProfileList()
@@ -1318,7 +1641,7 @@ void WizardUI::showPanel(int index)
 {
     _activePanel = index;
 
-    lv_obj_t* panels[] = {_panelFilter, _panelEq, _panelOutput, _panelVoice, _panelProfiles};
+    lv_obj_t* panels[] = {_panelFilter, _panelEq, _panelOutput, _panelVoice, _panelProfiles, _panelTinnitus};
     for (int i = 0; i < NUM_PANELS; i++) {
         if (panels[i]) {
             if (i == index)
@@ -1338,7 +1661,7 @@ void WizardUI::showPanel(int index)
 
 void WizardUI::updateNavHighlight()
 {
-    lv_obj_t* btns[] = {_navBtnFilter, _navBtnEq, _navBtnOutput, _navBtnVoice, _navBtnProfiles};
+    lv_obj_t* btns[] = {_navBtnFilter, _navBtnEq, _navBtnOutput, _navBtnVoice, _navBtnProfiles, _navBtnTinnitus};
     for (int i = 0; i < NUM_PANELS; i++) {
         if (!btns[i]) continue;
         if (i == _activePanel) {
@@ -2137,4 +2460,409 @@ void WizardUI::onProfileSetDefault(lv_event_t* e)
 {
     // Disabled in simplified panel
     (void)e;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tinnitus Relief Callbacks
+// ─────────────────────────────────────────────────────────────────────────────
+
+void WizardUI::onNotchToggle(lv_event_t* e)
+{
+    (void)lv_event_get_user_data(e);  // ui not used in callback
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int idx = (int)(intptr_t)lv_obj_get_user_data(btn);
+
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.tinnitus.notches[idx].enabled;
+    engine.setNotchEnabled(idx, newEnabled);
+
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "ON" : "OFF");
+        lv_obj_set_style_text_color(label,
+            lv_color_hex(newEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#else
+    (void)idx;
+#endif
+}
+
+void WizardUI::onNotchFreqChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int idx = (int)(intptr_t)lv_obj_get_user_data(slider);
+    int val = lv_slider_get_value(slider);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNotchFrequency(idx, (float)val);
+#endif
+
+    if (idx < 2 && ui->_notchFreqLabel[idx]) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_notchFreqLabel[idx], buf);
+    }
+}
+
+void WizardUI::onNotchQChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int idx = (int)(intptr_t)lv_obj_get_user_data(slider);
+    int val = lv_slider_get_value(slider);  // 10-160
+    float Q = (float)val / 10.0f;           // 1.0-16.0
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNotchQ(idx, Q);
+#endif
+
+    if (idx < 2 && ui->_notchQLabel[idx]) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.1f", (double)Q);
+        lv_label_set_text(ui->_notchQLabel[idx], buf);
+    }
+}
+
+void WizardUI::onNoiseTypeClicked(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int type = (int)(intptr_t)lv_obj_get_user_data(btn);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNoiseType(type);
+#endif
+
+    ui->_noiseActiveType = type;
+
+    // Update button highlights
+    for (int i = 0; i < 4; i++) {
+        if (!ui->_noiseTypeBtns[i]) continue;
+        bool active = (i == type);
+        lv_obj_set_style_border_color(ui->_noiseTypeBtns[i],
+            lv_color_hex(active ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+        lv_obj_t* child = lv_obj_get_child(ui->_noiseTypeBtns[i], 0);
+        if (child) {
+            lv_obj_set_style_text_color(child,
+                lv_color_hex(active ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+        }
+    }
+}
+
+void WizardUI::onNoiseLevelChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);  // 0-100
+    float level = (float)val / 100.0f;
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNoiseLevel(level);
+#endif
+
+    if (ui->_noiseLevelLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", val);
+        lv_label_set_text(ui->_noiseLevelLabel, buf);
+    }
+}
+
+void WizardUI::onNoiseLowCutChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNoiseLowCut((float)val);
+#endif
+
+    if (ui->_noiseLowCutLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_noiseLowCutLabel, buf);
+    }
+}
+
+void WizardUI::onNoiseHighCutChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setNoiseHighCut((float)val);
+#endif
+
+    if (ui->_noiseHighCutLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_noiseHighCutLabel, buf);
+    }
+}
+
+void WizardUI::onToneFinderToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    (void)ui;
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.tinnitus.toneFinderEnabled;
+    engine.setToneFinderEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "ON" : "OFF");
+        lv_obj_set_style_text_color(label,
+            lv_color_hex(newEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#endif
+}
+
+void WizardUI::onToneFinderFreqChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setToneFinderFreq((float)val);
+#endif
+
+    if (ui->_toneFinderFreqLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_toneFinderFreqLabel, buf);
+    }
+}
+
+void WizardUI::onToneFinderLevelChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);  // 0-100
+    float level = (float)val / 100.0f;
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setToneFinderLevel(level);
+#endif
+
+    if (ui->_toneFinderLevelLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", val);
+        lv_label_set_text(ui->_toneFinderLevelLabel, buf);
+    }
+}
+
+void WizardUI::onToneFinderTransfer(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    float freq = params.tinnitus.toneFinderFreq;
+
+    // Copy tone finder frequency to notch 0 and enable it
+    engine.setNotchFrequency(0, freq);
+    engine.setNotchEnabled(0, true);
+
+    // Update UI
+    if (ui->_notchFreqSlider[0]) {
+        lv_slider_set_value(ui->_notchFreqSlider[0], (int)freq, LV_ANIM_OFF);
+    }
+    if (ui->_notchFreqLabel[0]) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", (int)freq);
+        lv_label_set_text(ui->_notchFreqLabel[0], buf);
+    }
+    if (ui->_notchToggle[0]) {
+        lv_obj_set_style_border_color(ui->_notchToggle[0], lv_color_hex(CYAN_GLOW), LV_PART_MAIN);
+        lv_obj_t* label = lv_obj_get_child(ui->_notchToggle[0], 0);
+        if (label) {
+            lv_label_set_text(label, "ON");
+            lv_obj_set_style_text_color(label, lv_color_hex(GOLD_BRIGHT), LV_PART_MAIN);
+        }
+    }
+#else
+    (void)ui;
+#endif
+}
+
+void WizardUI::onHfExtToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    (void)ui;
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.tinnitus.hfExtEnabled;
+    engine.setHfExtEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "ON" : "OFF");
+        lv_obj_set_style_text_color(label,
+            lv_color_hex(newEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#endif
+}
+
+void WizardUI::onHfExtFreqChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setHfExtFreq((float)val);
+#endif
+
+    if (ui->_hfExtFreqLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%dk", val / 1000);
+        lv_label_set_text(ui->_hfExtFreqLabel, buf);
+    }
+}
+
+void WizardUI::onHfExtGainChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);  // 0-120
+    float gainDb = (float)val / 10.0f;      // 0-12 dB
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setHfExtGainDb(gainDb);
+#endif
+
+    if (ui->_hfExtGainLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.0fdB", (double)gainDb);
+        lv_label_set_text(ui->_hfExtGainLabel, buf);
+    }
+}
+
+void WizardUI::onBinauralToggle(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    (void)ui;
+#ifdef ESP_PLATFORM
+    auto& engine = AudioEngine::getInstance();
+    auto params = engine.getParams();
+    bool newEnabled = !params.tinnitus.binauralEnabled;
+    engine.setBinauralEnabled(newEnabled);
+
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    lv_obj_t* label = lv_obj_get_child(btn, 0);
+    if (label) {
+        lv_label_set_text(label, newEnabled ? "ON" : "OFF");
+        lv_obj_set_style_text_color(label,
+            lv_color_hex(newEnabled ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+    }
+    lv_obj_set_style_border_color(btn,
+        lv_color_hex(newEnabled ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+#endif
+}
+
+void WizardUI::onBinauralCarrierChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setBinauralCarrier((float)val);
+#endif
+
+    if (ui->_binauralCarrierLabel) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d Hz", val);
+        lv_label_set_text(ui->_binauralCarrierLabel, buf);
+    }
+}
+
+void WizardUI::onBinauralBeatChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);  // 1-40 Hz
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setBinauralBeat((float)val);
+#endif
+
+    if (ui->_binauralBeatLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%dHz", val);
+        lv_label_set_text(ui->_binauralBeatLabel, buf);
+    }
+}
+
+void WizardUI::onBinauralLevelChanged(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* slider = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int val = lv_slider_get_value(slider);  // 0-100
+    float level = (float)val / 100.0f;
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setBinauralLevel(level);
+#endif
+
+    if (ui->_binauralLevelLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", val);
+        lv_label_set_text(ui->_binauralLevelLabel, buf);
+    }
+}
+
+void WizardUI::onBinauralPresetClicked(lv_event_t* e)
+{
+    auto* ui = static_cast<WizardUI*>(lv_event_get_user_data(e));
+    auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    int preset = (int)(intptr_t)lv_obj_get_user_data(btn);
+
+    // Preset beat frequencies: Delta=2, Theta=6, Alpha=10, Beta=20
+    const float beatFreqs[] = {2.0f, 6.0f, 10.0f, 20.0f};
+
+#ifdef ESP_PLATFORM
+    AudioEngine::getInstance().setBinauralBeat(beatFreqs[preset]);
+#endif
+
+    ui->_binauralActivePreset = preset;
+
+    // Update slider
+    if (ui->_binauralBeatSlider) {
+        lv_slider_set_value(ui->_binauralBeatSlider, (int)beatFreqs[preset], LV_ANIM_OFF);
+    }
+    if (ui->_binauralBeatLabel) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%.0fHz", (double)beatFreqs[preset]);
+        lv_label_set_text(ui->_binauralBeatLabel, buf);
+    }
+
+    // Update button highlights
+    for (int i = 0; i < 4; i++) {
+        if (!ui->_binauralPresetBtns[i]) continue;
+        bool active = (i == preset);
+        lv_obj_set_style_border_color(ui->_binauralPresetBtns[i],
+            lv_color_hex(active ? CYAN_GLOW : GOLD), LV_PART_MAIN);
+        lv_obj_t* child = lv_obj_get_child(ui->_binauralPresetBtns[i], 0);
+        if (child) {
+            lv_obj_set_style_text_color(child,
+                lv_color_hex(active ? GOLD_BRIGHT : LAVENDER), LV_PART_MAIN);
+        }
+    }
 }

@@ -58,7 +58,7 @@ private:
     static constexpr int CONTENT_W   = SCREEN_W - NAV_W;
     static constexpr int CONTENT_H   = SCREEN_H - HEADER_H - FOOTER_H;
 
-    static constexpr int NUM_PANELS  = 5;
+    static constexpr int NUM_PANELS  = 6;
 
     // Root container
     lv_obj_t* _root = nullptr;
@@ -77,6 +77,7 @@ private:
     lv_obj_t* _navBtnOutput = nullptr;
     lv_obj_t* _navBtnVoice = nullptr;
     lv_obj_t* _navBtnProfiles = nullptr;
+    lv_obj_t* _navBtnTinnitus = nullptr;
     int _activePanel = 0;
 
     // Content panels
@@ -86,6 +87,7 @@ private:
     lv_obj_t* _panelOutput = nullptr;
     lv_obj_t* _panelVoice = nullptr;
     lv_obj_t* _panelProfiles = nullptr;
+    lv_obj_t* _panelTinnitus = nullptr;
 
     // Filter panel controls
     lv_obj_t* _hpfToggle = nullptr;
@@ -158,6 +160,8 @@ private:
     lv_obj_t* _veRefLpfValueLabel = nullptr;
     lv_obj_t* _veHpMeterBar = nullptr;
     lv_obj_t* _veHpMeterPeak = nullptr;
+    lv_obj_t* _veLevelMatchIndicator = nullptr;  // Level match indicator (HP vs Main mic)
+    lv_obj_t* _veLevelMatchLabel = nullptr;      // Shows ratio text
     lv_obj_t* _veBlendSlider = nullptr;
     lv_obj_t* _veBlendValueLabel = nullptr;
     // NLMS-specific controls
@@ -197,6 +201,50 @@ private:
     lv_obj_t* _profileStatusLabel = nullptr;
     lv_obj_t* _profileDefaultLabel = nullptr;
 
+    // Tinnitus relief panel controls
+    // Notch filter controls (6 filters, simplified UI shows 2)
+    lv_obj_t* _notchToggle[2] = {};
+    lv_obj_t* _notchFreqSlider[2] = {};
+    lv_obj_t* _notchFreqLabel[2] = {};
+    lv_obj_t* _notchQSlider[2] = {};
+    lv_obj_t* _notchQLabel[2] = {};
+
+    // Masking noise controls
+    lv_obj_t* _noiseTypeBtns[4] = {};  // OFF, WHITE, PINK, BROWN
+    int _noiseActiveType = 0;
+    lv_obj_t* _noiseLevelSlider = nullptr;
+    lv_obj_t* _noiseLevelLabel = nullptr;
+    lv_obj_t* _noiseLowCutSlider = nullptr;
+    lv_obj_t* _noiseLowCutLabel = nullptr;
+    lv_obj_t* _noiseHighCutSlider = nullptr;
+    lv_obj_t* _noiseHighCutLabel = nullptr;
+
+    // Tone finder controls
+    lv_obj_t* _toneFinderToggle = nullptr;
+    lv_obj_t* _toneFinderFreqSlider = nullptr;
+    lv_obj_t* _toneFinderFreqLabel = nullptr;
+    lv_obj_t* _toneFinderLevelSlider = nullptr;
+    lv_obj_t* _toneFinderLevelLabel = nullptr;
+    lv_obj_t* _toneFinderTransferBtn = nullptr;
+
+    // HF extension controls
+    lv_obj_t* _hfExtToggle = nullptr;
+    lv_obj_t* _hfExtFreqSlider = nullptr;
+    lv_obj_t* _hfExtFreqLabel = nullptr;
+    lv_obj_t* _hfExtGainSlider = nullptr;
+    lv_obj_t* _hfExtGainLabel = nullptr;
+
+    // Binaural beats controls
+    lv_obj_t* _binauralToggle = nullptr;
+    lv_obj_t* _binauralCarrierSlider = nullptr;
+    lv_obj_t* _binauralCarrierLabel = nullptr;
+    lv_obj_t* _binauralBeatSlider = nullptr;
+    lv_obj_t* _binauralBeatLabel = nullptr;
+    lv_obj_t* _binauralLevelSlider = nullptr;
+    lv_obj_t* _binauralLevelLabel = nullptr;
+    lv_obj_t* _binauralPresetBtns[4] = {};  // Delta, Theta, Alpha, Beta
+    int _binauralActivePreset = 2;  // Alpha
+
     // Footer
     lv_obj_t* _footerBar = nullptr;
     lv_obj_t* _hpStatusLabel = nullptr;
@@ -210,6 +258,7 @@ private:
     void createOutputPanel();
     void createVoicePanel();
     void createProfilesPanel();
+    void createTinnitusPanel();
     void createFooter();
     void showPanel(int index);
     void updateNavHighlight();
@@ -264,4 +313,25 @@ private:
     static void onProfileLoad(lv_event_t* e);
     static void onProfileDelete(lv_event_t* e);
     static void onProfileSetDefault(lv_event_t* e);
+
+    // Tinnitus panel callbacks
+    static void onNotchToggle(lv_event_t* e);
+    static void onNotchFreqChanged(lv_event_t* e);
+    static void onNotchQChanged(lv_event_t* e);
+    static void onNoiseTypeClicked(lv_event_t* e);
+    static void onNoiseLevelChanged(lv_event_t* e);
+    static void onNoiseLowCutChanged(lv_event_t* e);
+    static void onNoiseHighCutChanged(lv_event_t* e);
+    static void onToneFinderToggle(lv_event_t* e);
+    static void onToneFinderFreqChanged(lv_event_t* e);
+    static void onToneFinderLevelChanged(lv_event_t* e);
+    static void onToneFinderTransfer(lv_event_t* e);
+    static void onHfExtToggle(lv_event_t* e);
+    static void onHfExtFreqChanged(lv_event_t* e);
+    static void onHfExtGainChanged(lv_event_t* e);
+    static void onBinauralToggle(lv_event_t* e);
+    static void onBinauralCarrierChanged(lv_event_t* e);
+    static void onBinauralBeatChanged(lv_event_t* e);
+    static void onBinauralLevelChanged(lv_event_t* e);
+    static void onBinauralPresetClicked(lv_event_t* e);
 };
